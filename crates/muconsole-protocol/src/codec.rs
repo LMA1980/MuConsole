@@ -8,7 +8,9 @@ use core::fmt;
 use serde::{de::DeserializeOwned, Serialize};
 
 /// Protocol version carried by every frame. Bump on any breaking change.
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// History: 1 = Phase 1 skeleton; 2 = Phase 2 data plane (full view models).
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Codec failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +87,7 @@ pub fn decode<T: DeserializeOwned>(frame: &[u8]) -> Result<T, CodecError> {
 mod tests {
     use super::*;
     use crate::model::*;
+    use crate::view::*;
     use alloc::string::ToString;
     use alloc::vec;
 
@@ -97,6 +100,10 @@ mod tests {
 
     fn commands() -> Vec<UiCommand> {
         vec![
+            UiCommand::Configure(crate::WorkerConfig {
+                api_base: "/edge".to_string(),
+                scenario: Some("tainted".to_string()),
+            }),
             UiCommand::Subscribe(Route {
                 area: Area::Ci,
                 repo: Some(repo("LMA1980", "MuConsole")),
@@ -126,16 +133,18 @@ mod tests {
     }
 
     fn events() -> Vec<DataEvent> {
-        let score = RepoScore {
-            id: repo("LMA1980", "MuConsole"),
-            status: RepoStatus::Running,
-            score: 81,
-            coverage_bp: 8_300,
-        };
+        let mut score = RepoScore::new(repo("LMA1980", "MuConsole"));
+        score.status = RepoStatus::Running;
+        score.score = 81;
+        score.coverage_bp = 8_300;
         vec![
+            DataEvent::Ready {
+                protocol: PROTOCOL_VERSION,
+                source: DataSource::Scenario("node-lost".to_string()),
+            },
             DataEvent::Snapshot(ViewModel {
-                fabric_rev: 482,
                 repos: vec![score.clone()],
+                ..ViewModel::default()
             }),
             DataEvent::Snapshot(ViewModel::default()),
             DataEvent::Patch(vec![
@@ -143,8 +152,12 @@ mod tests {
                 Delta::RepoUpsert(score),
                 Delta::RepoRemoved(repo("LMA1980", "old")),
             ]),
-            DataEvent::Connection(ConnState::Reconnecting { attempt: 2 }),
+            DataEvent::Connection(ConnState::Reconnecting {
+                attempt: 2,
+                retry_in_ms: 1_000,
+            }),
             DataEvent::Connection(ConnState::Live),
+            DataEvent::Connection(ConnState::Paused),
             DataEvent::Error(UiError::VersionMismatch {
                 expected: 1,
                 found: 2,
@@ -153,6 +166,14 @@ mod tests {
                 status: 503,
                 message: "upstream".to_string(),
             }),
+            DataEvent::Error(UiError::UnknownScenario("nope".to_string())),
+            DataEvent::AreaBadges(AreaBadges {
+                overview: 0,
+                ci: 2,
+                cd: 1,
+                fleet: 1,
+            }),
+            DataEvent::Heartbeat { seq: 7 },
         ]
     }
 
