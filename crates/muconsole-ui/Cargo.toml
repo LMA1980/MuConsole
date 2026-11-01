@@ -1,0 +1,13 @@
+[package]
+name = "muconsole-ui"
+description = "MuConsole main-thread WASM UI module (SVG renderer); Leptos lands in a later phase"
+license = "AGPL-3.0-only"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+muconsole-protocol = { workspace = true }
+muconsole-theme = { workspace = true }
+muconsole-layout = { workspace = true }

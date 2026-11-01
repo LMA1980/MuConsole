@@ -1,0 +1,12 @@
+[package]
+name = "muconsole-layout"
+description = "MuConsole pure layout solver: breakpoints, frame solver and metric-aware CRT column grids (zero page scroll)"
+license = "AGPL-3.0-only"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+muconsole-protocol = { workspace = true }
+muconsole-theme = { workspace = true }
