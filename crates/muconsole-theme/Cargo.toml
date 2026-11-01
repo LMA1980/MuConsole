@@ -1,0 +1,21 @@
+[package]
+name = "muconsole-theme"
+description = "MuConsole 'Avionics Terminal' theme: material tokens, 5x7 LCD glyphs, Nerd icon table, font metrics and a dependency-free SVG instrument library"
+license = "AGPL-3.0-only"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+roxmltree = { workspace = true }
+
+[[bin]]
+name = "muconsole-subset-unicodes"
+path = "src/bin/subset_unicodes.rs"
+
+[[bin]]
+name = "muconsole-tokens-css"
+path = "src/bin/tokens_css.rs"
