@@ -17,7 +17,9 @@ muconsole-theme = { workspace = true }
 muconsole-layout = { workspace = true }
 
 [dev-dependencies]
+muconsole-data = { path = "../muconsole-data" }
 postcard = { workspace = true }
+roxmltree = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true }

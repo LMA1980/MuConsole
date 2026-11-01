@@ -8,12 +8,16 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 use js_sys::{Array, ArrayBuffer, Uint8Array};
+use muconsole_layout::{SafeArea, Viewport};
 use muconsole_protocol::{UiCommand, WorkerConfig};
+use muconsole_theme::wireframe::WireframeSkin;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use web_sys::{console, MessageEvent, Worker};
 
 use crate::client::{reload_banner_text, ClientUpdate, DataClient, WORKER_URL};
+use crate::components::{render_console, render_html_shell};
+use crate::state::ConsoleState;
 
 thread_local! {
     static WORKER: RefCell<Option<Worker>> = const { RefCell::new(None) };
@@ -65,19 +69,44 @@ pub fn start() {
             return;
         }
     };
-    let client = Rc::new(RefCell::new(DataClient::new()));
+    let state = Rc::new(RefCell::new(ConsoleState::new()));
+    {
+        let hash = location.hash().unwrap_or_default();
+        let search = location.search().unwrap_or_default();
+        state.borrow_mut().init_from_env(&hash, &search, None);
+    }
     let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(move |ev: MessageEvent| {
         let data = ev.data();
         let bytes = data
             .dyn_ref::<ArrayBuffer>()
             .map(|b| Uint8Array::new(b).to_vec())
             .unwrap_or_default();
-        let mut c = client.borrow_mut();
-        match c.on_frame(&bytes) {
+        let mut st = state.borrow_mut();
+        match st.on_worker_frame(&bytes) {
             ClientUpdate::ReloadRequired { expected, found } => {
                 show_banner(&reload_banner_text(expected, found));
             }
-            ClientUpdate::View => console::log_1(&JsValue::from_str(&c.summary())),
+            ClientUpdate::View => {
+                if let Some(win) = web_sys::window() {
+                    let w = win
+                        .inner_width()
+                        .ok()
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(1512.0);
+                    let h = win
+                        .inner_height()
+                        .ok()
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(860.0);
+                    let svg =
+                        render_console(&WireframeSkin, &st, Viewport::new(w, h), SafeArea::ZERO);
+                    let html = render_html_shell(&svg, &st);
+                    if let Some(body) = win.document().and_then(|d| d.body()) {
+                        body.set_inner_html(&html);
+                    }
+                }
+                console::log_1(&JsValue::from_str(&st.client.summary()));
+            }
             ClientUpdate::Heartbeat => {}
             other => console::log_1(&JsValue::from_str(&format!("muconsole: {other:?}"))),
         }
