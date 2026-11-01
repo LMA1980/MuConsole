@@ -1,11 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! MuConsole main-thread UI module (Phase 1 stub).
+//! MuConsole main-thread UI module.
 //!
 //! The Leptos 0.8 CSR renderer, router and input handling land in Phase 3.
-//! Phase 1 only wires the theme and layout crates together so the module
-//! builds for `wasm32-unknown-unknown` and the static layer can already be
-//! rendered from a solved frame set.
+//! Phase 2 adds [`client::DataClient`] (main-thread mirror of the data
+//! worker's view model) and [`boot`] (worker spawn + transferable
+//! `ArrayBuffer` message bridge).
 #![forbid(unsafe_code)]
+
+#[cfg(target_arch = "wasm32")]
+pub mod boot;
+pub mod client;
+
+pub use client::{reload_banner_text, ClientUpdate, DataClient, WORKER_URL};
 
 use muconsole_layout::{solve, Area, Frames, SafeArea, Viewport};
 use muconsole_theme::defs::write_defs;
