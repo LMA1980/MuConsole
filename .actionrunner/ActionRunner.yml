@@ -116,12 +116,14 @@ on_action:
     - fmt-check
     - docs-check
     - clippy-check
+    - audit-check
     - coverage-test
     - wasm32-build
   merge:
     - fmt-check
     - docs-check
     - clippy-check
+    - audit-check
     - coverage-test
     - wasm32-build
   tag:
