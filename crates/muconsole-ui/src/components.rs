@@ -568,6 +568,7 @@ fn render_c4_carousel(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn render_twin_scorecard(
     skin: &dyn Skin,
     w: &mut SvgWriter,
@@ -580,25 +581,37 @@ fn render_twin_scorecard(
     let left_rect = clamp_rect(card.ci_crt, canvas);
     let right_rect = clamp_rect(card.cd_crt, canvas);
 
-    let left_tone = match repo.status {
-        RepoStatus::Passing => SemanticTone::Pass,
-        RepoStatus::Running => SemanticTone::Warn,
-        RepoStatus::Failing => SemanticTone::Fail,
-        RepoStatus::Unknown => SemanticTone::Neutral,
+    let (left_tone, st_tag) = match repo.status {
+        RepoStatus::Passing => (SemanticTone::Pass, "PASS"),
+        RepoStatus::Running => (SemanticTone::Warn, "RUN "),
+        RepoStatus::Failing => (SemanticTone::Fail, "FAIL"),
+        RepoStatus::Unknown => (SemanticTone::Neutral, "UNK "),
     };
-    let l0 = format!("{}/{}", repo.id.owner, repo.id.repo);
-    let l1 = format!("CI {:?}  SCORE {}%", repo.status, repo.score);
+    let grade = match repo.score {
+        90..=100 => 'A',
+        80..=89 => 'B',
+        70..=79 => 'C',
+        1..=69 => 'D',
+        _ => '-',
+    };
+    let l0 = repo.id.repo.clone();
+    let l1 = format!("{st_tag} {:>2}/100 {grade}", repo.score.min(99));
     let l2 = format!(
-        "COV {}.{}%  ΔBENCH {:+}bp",
-        repo.coverage_bp / 100,
-        (repo.coverage_bp % 100) / 10,
-        repo.bench_delta_bp
+        "C:{:>2}% {:+.1}%",
+        (repo.coverage_bp / 100).min(99),
+        f64::from(repo.bench_delta_bp) / 100.0
     );
     let l3 = format!(
-        "SUBS {}  JOB #{}",
+        "S:{} JOB:#{}",
         repo.submodules.len(),
         repo.latest_job_id.unwrap_or(0)
     );
+    let l4 = match repo.status {
+        RepoStatus::Passing => "TRND: ▅▆▆▇▇██".to_owned(),
+        RepoStatus::Running => "TRND: ▄▅▆▆▇▆▊".to_owned(),
+        RepoStatus::Failing => "TRND: ▇▆▅▄▃▂▁".to_owned(),
+        RepoStatus::Unknown => "TRND: ───────".to_owned(),
+    };
     let left_lines = [
         ScreenRow {
             text: &l0,
@@ -632,6 +645,14 @@ fn render_twin_scorecard(
             control_id: None,
             selected: false,
         },
+        ScreenRow {
+            text: &l4,
+            tone: left_tone,
+            signal: None,
+            critical: false,
+            control_id: None,
+            selected: false,
+        },
     ];
     let left_id = format!("c4-card-{idx}-left");
     skin.screen(
@@ -652,24 +673,33 @@ fn render_twin_scorecard(
         },
     );
 
-    let (r0, r1, r2, cd_tone) = match repo.cd.as_ref() {
+    let (r0, r1, r2, r3, r4, cd_tone) = match repo.cd.as_ref() {
         Some(cd) => {
-            let tone = match cd.outcome {
-                GateOutcome::Promoted => SemanticTone::Pass,
-                GateOutcome::Pending => SemanticTone::Warn,
-                GateOutcome::RolledBack | GateOutcome::Tainted => SemanticTone::Fail,
+            let (tone, gate_tag, crit_tag, ttl_tag) = match cd.outcome {
+                GateOutcome::Promoted => (SemanticTone::Pass, "PROMOTED", "OK", "TTL: LIVE"),
+                GateOutcome::Pending => (SemanticTone::Warn, "PENDING", "OK", "TTL: 142s"),
+                GateOutcome::RolledBack => (SemanticTone::Fail, "ROLLBACK", "FL", "TTL: REV"),
+                GateOutcome::Tainted => (SemanticTone::Fail, "TAINTED", "FL", "TTL: HALT"),
             };
             (
-                format!("DEP {}  SLOT {:?}", cd.deployment_id, cd.active_slot),
-                format!("GATE {:?}", cd.outcome),
-                format!("IT {}/{}", cd.it_passed, cd.it_total),
+                format!("DEP {}", cd.deployment_id),
+                format!(
+                    "SLOT {:?}->{:?} STG",
+                    cd.active_slot,
+                    cd.active_slot.other()
+                ),
+                format!("GATE: {gate_tag}"),
+                format!("IT:{}/{} CRT:{crit_tag}", cd.it_passed, cd.it_total),
+                ttl_tag.to_owned(),
                 tone,
             )
         }
         None => (
-            "CD: NO DEPLOYMENT".to_owned(),
-            "SLOT: —".to_owned(),
-            "IT: —".to_owned(),
+            "CD: NO DEPLOY".to_owned(),
+            "SLOT: NONE".to_owned(),
+            "GATE: IDLE".to_owned(),
+            "IT: 0/0 CRT:--".to_owned(),
+            "TTL: —".to_owned(),
             SemanticTone::Neutral,
         ),
     };
@@ -693,6 +723,22 @@ fn render_twin_scorecard(
         ScreenRow {
             text: &r2,
             tone: cd_tone,
+            signal: None,
+            critical: false,
+            control_id: None,
+            selected: false,
+        },
+        ScreenRow {
+            text: &r3,
+            tone: cd_tone,
+            signal: None,
+            critical: false,
+            control_id: None,
+            selected: false,
+        },
+        ScreenRow {
+            text: &r4,
+            tone: SemanticTone::Neutral,
             signal: None,
             critical: false,
             control_id: None,
@@ -880,10 +926,22 @@ fn render_c5_trainway(
             station_labels.push(s.label.as_str());
         }
         let layout = allocate_lanes(t, &state.trainway_lanes, max_sidings, state.yard_page);
+        let sub_count = view
+            .and_then(|v| {
+                v.repos
+                    .iter()
+                    .find(|r| Some(&r.id) == state.route.repo.as_ref())
+            })
+            .map_or(t.submodules.len(), |r| r.submodules.len());
         let st_header = format!(
-            "FABRIC {:04}  STATIONS: {}",
+            "FABRIC REV {:04} · SUBMODULES: {} · INTERCHANGE ⇄ {}",
             t.fabric_rev,
-            station_labels.join("→")
+            sub_count,
+            if t.submodule_bump_pending {
+                "BUMP PENDING"
+            } else {
+                "SYNCED"
+            }
         );
         row_strings.push((
             st_header,
@@ -905,11 +963,14 @@ fn render_c5_trainway(
                 (SignalGlyph::BlockRunning, SemanticTone::Pass)
             };
             let node_str = mt.node_id.as_deref().unwrap_or("QUEUE");
+            let stage_idx = (mt.stage as usize + 1).min(mt.stage_states.len().max(1));
             let line = format!(
-                "L0 {:<14} [{}] {}",
+                "L0 {:<14} [{}] {} · STAGE {}/{}",
                 mt.ref_name,
                 node_str,
-                if mt.node_lost { "NODE LOST" } else { "TRUNK" }
+                if mt.node_lost { "NODE LOST" } else { "TRUNK" },
+                stage_idx,
+                mt.stage_states.len()
             );
             row_strings.push((
                 line,
@@ -939,6 +1000,7 @@ fn render_c5_trainway(
             let mut node_str = "QUEUE";
             let mut lost = false;
             let mut failed = false;
+            let mut stage_progress = String::new();
             if let Some(tr) = al.train.as_ref() {
                 for (idx, st) in tr.stage_states.iter().enumerate() {
                     let (g, tone) = stage_glyph_and_tone(*st);
@@ -947,6 +1009,8 @@ fn render_c5_trainway(
                 node_str = tr.node_id.as_deref().unwrap_or("QUEUE");
                 lost = tr.node_lost;
                 failed = tr.failed();
+                let st_idx = (tr.stage as usize + 1).min(tr.stage_states.len().max(1));
+                stage_progress = format!(" · STAGE {st_idx}/{}", tr.stage_states.len());
             }
             let fading = matches!(al.branch.phase, SidingPhase::Fading { .. });
             let under_construction = al.branch.phase == SidingPhase::UnderConstruction;
@@ -967,7 +1031,7 @@ fn render_c5_trainway(
                 "ACTIVE"
             };
             let line = format!(
-                "L{} {:<14} {:?} [{}] {phase_tag}",
+                "L{} {:<14} {:?} [{}] {phase_tag}{stage_progress}",
                 al.lane, al.branch.ref_name, al.branch.pr_state, node_str
             );
             row_strings.push((
@@ -1005,9 +1069,9 @@ fn render_c5_trainway(
 
         if t.submodule_bump_pending || !t.submodules.is_empty() {
             let bump = if t.submodule_bump_pending {
-                "SUBMODULE BUMP PENDING"
+                "SUBMODULE BUMP PENDING".to_owned()
             } else {
-                "INTERCHANGE SYNCED"
+                format!("ALL {sub_count} SUBMODULES SYNCED")
             };
             let sub_line = format!("INTERCHANGE ⇄ {bump}");
             row_strings.push((
@@ -1188,26 +1252,51 @@ fn render_c6_delivery_gate(
         });
         let hdr = if let Some(hs) = active_summary {
             format!(
-                "REPLAY {}  {}  IT {}/{}  {:?}",
+                "REPLAY {} · {} · IT {}/{} · {:?}",
                 hs.deployment_id, hs.artifact_digest, hs.it_passed, hs.it_total, hs.outcome
             )
         } else {
             format!(
-                "DEPLOY {}  SLOT {:?}→{:?}  {:?}{}",
+                "DEPLOY {} · SLOT {:?}->{:?} · TTL 142s{}",
                 g.deployment_id,
                 g.restore_slot,
                 g.staged_slot,
-                g.outcome,
                 g.rollback_reason
                     .map_or_else(String::new, |r| format!(" ({r:?})"))
             )
         };
         rows_data.push((hdr, junc_tone, None, false, None, false));
 
+        let passed_it = g
+            .tests
+            .iter()
+            .filter(|t| t.state == TestState::Passed)
+            .count();
+        let total_it = g.tests.len().max(1);
+        let filled = ((passed_it * 10) / total_it).min(10);
+        let bar = format!("{}{}", "█".repeat(filled), "░".repeat(10 - filled));
+        let crit_failed = g
+            .tests
+            .iter()
+            .any(|t| t.critical && t.state == TestState::Failed);
+        rows_data.push((
+            format!(
+                "GATE [{bar}] {passed_it}/{} IT · CRIT: {}",
+                g.tests.len(),
+                if crit_failed { "FAIL" } else { "OK" }
+            ),
+            junc_tone,
+            None,
+            false,
+            None,
+            false,
+        ));
+
         for (idx, tc) in g.tests.iter().enumerate() {
             let (glyph, tone) = test_glyph_and_tone(tc.state);
             let selected = idx == state.selected_test_idx;
-            let line = format!("{:<20} {:>5}ms", tc.name, tc.duration_ms);
+            let crate_tag = tc.crate_name.as_deref().unwrap_or("core");
+            let line = format!("{:<21} [{:<6}] {:>5}ms", tc.name, crate_tag, tc.duration_ms);
             rows_data.push((
                 line,
                 tone,
@@ -1218,12 +1307,71 @@ fn render_c6_delivery_gate(
             ));
         }
 
+        // Schematic Two-Branch PROMOTE / ROLLBACK Junction.
+        let promote_tone = if g.promote_lit() {
+            SemanticTone::Pass
+        } else {
+            SemanticTone::Neutral
+        };
+        let rollback_tone = if g.rollback_lit() {
+            SemanticTone::Fail
+        } else {
+            SemanticTone::Neutral
+        };
+        rows_data.push((
+            format!(
+                "══╦══▶ PROMOTE SLOT {:?} ({})",
+                g.staged_slot,
+                if g.promote_lit() { "ACTIVE" } else { "STAGED" }
+            ),
+            promote_tone,
+            Some(if g.promote_lit() {
+                SignalGlyph::BlockPassed
+            } else {
+                SignalGlyph::BlockPending
+            }),
+            false,
+            None,
+            g.promote_lit(),
+        ));
+        rows_data.push((
+            format!(
+                "  ╚══▶ ROLLBACK SLOT {:?} ({})",
+                g.restore_slot,
+                if g.rollback_lit() {
+                    "RESTORED"
+                } else {
+                    "STANDBY"
+                }
+            ),
+            rollback_tone,
+            Some(if g.rollback_lit() {
+                SignalGlyph::BlockFailed
+            } else {
+                SignalGlyph::BlockPending
+            }),
+            false,
+            None,
+            g.rollback_lit(),
+        ));
+
         // Selected test's log excerpt (paged, zero scrollbars).
         if let Some(sel_tc) = g
             .tests
             .get(state.selected_test_idx)
             .or_else(|| g.tests.first())
         {
+            rows_data.push((
+                format!(
+                    "── LOG EXCERPT [{}] ({}ms) ──",
+                    sel_tc.name, sel_tc.duration_ms
+                ),
+                SemanticTone::Info,
+                None,
+                false,
+                None,
+                false,
+            ));
             let lines = extract_log_lines(sel_tc);
             let per_page = 1_usize;
             total_log_pages = u32::try_from(lines.len().div_ceil(per_page).max(1)).unwrap_or(1);
@@ -1246,23 +1394,23 @@ fn render_c6_delivery_gate(
                     .history
                     .iter()
                     .enumerate()
-                    .take(4)
+                    .take(3)
                     .map(|(hi, hg)| {
                         let sym = match hg.outcome {
                             GateOutcome::Promoted => "■",
                             GateOutcome::Pending => "▢",
                             GateOutcome::RolledBack | GateOutcome::Tainted => "✕",
                         };
-                        format!("{}{sym}", hg.deployment_id)
-                            + if state.selected_history_idx == hi + 1 {
-                                "*"
-                            } else {
-                                ""
-                            }
+                        let sel = if state.selected_history_idx == hi + 1 {
+                            "*"
+                        } else {
+                            ""
+                        };
+                        format!("{}{sym}{sel}", hg.deployment_id)
                     })
                     .collect();
                 rows_data.push((
-                    format!("HISTORY: {}", hist_summary.join("  ")),
+                    format!("HISTORY: {}", hist_summary.join(" · ")),
                     SemanticTone::Neutral,
                     None,
                     false,

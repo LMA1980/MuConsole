@@ -452,7 +452,7 @@ impl Skin for WireframeSkin {
         w.close();
     }
 
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
     fn screen(&self, w: &mut SvgWriter, s: &Screen<'_>) {
         let r = s.rect;
         w.tag("g")
@@ -477,56 +477,30 @@ impl Skin for WireframeSkin {
             .attr("stroke-width", 1.0)
             .end();
 
-        // Draw schematic railway tracks if present.
-        if !s.tracks.is_empty() && !s.stations.is_empty() {
-            draw_tracks(w, r, s.stations, s.tracks);
-        }
-
-        // Draw text rows clipped strictly to `s.rows` and `s.cols`.
         let font_px = s.font_px.max(10.0);
         let row_h = (font_px * 1.3).max(14.0);
         let max_rows = s.rows.max(1);
         let pad_x = 8.0;
         let pad_y = 8.0;
-        for (idx, row) in s.lines.iter().take(max_rows).enumerate() {
-            let y = r.y + pad_y + (idx as f64 + 0.8) * row_h;
-            if y > r.bottom() - 4.0 {
-                break;
+
+        if !s.tracks.is_empty() && !s.stations.is_empty() && r.h >= 180.0 {
+            draw_integrated_trainway(w, s, r, font_px, row_h, max_rows, pad_x, pad_y);
+        } else {
+            if !s.tracks.is_empty() && !s.stations.is_empty() {
+                draw_tracks_compact(w, r, s.stations, s.tracks);
             }
-            let prefix = match (row.signal, row.critical) {
-                (Some(sig), true) => format!("{} [C] ", sig.symbol()),
-                (Some(sig), false) => format!("{} ", sig.symbol()),
-                (None, true) => "[C] ".to_owned(),
-                (None, false) => String::new(),
+            let visible_count = s.lines.len().min(max_rows).max(1);
+            let step_h = if r.h >= 220.0 && visible_count >= 6 {
+                ((r.h - 2.0 * pad_y - 8.0) / visible_count as f64).clamp(row_h, row_h * 1.65)
+            } else {
+                row_h
             };
-            let full = format!("{prefix}{}", row.text);
-            let clipped = truncate_chars(&full, s.cols.max(1));
-            if let Some(cid) = row.control_id {
-                w.tag("g")
-                    .attr("data-control-id", cid)
-                    .attr("role", "button")
-                    .attr("tabindex", 0_u32)
-                    .attr("aria-selected", if row.selected { "true" } else { "false" })
-                    .open();
-                if row.selected {
-                    w.tag("rect")
-                        .attr("x", r.x + 2.0)
-                        .attr("y", y - font_px)
-                        .attr("width", (r.w - 4.0).max(1.0))
-                        .attr("height", row_h)
-                        .attr("fill", "#1b2433")
-                        .end();
+            for (idx, row) in s.lines.iter().take(max_rows).enumerate() {
+                let y = r.y + pad_y + (idx as f64 + 0.8) * step_h;
+                if y > r.bottom() - 4.0 {
+                    break;
                 }
-            }
-            w.tag("text")
-                .attr("x", r.x + pad_x)
-                .attr("y", y)
-                .attr("fill", row.tone.wireframe_fg())
-                .attr("font-family", s.font_family)
-                .attr("font-size", font_px)
-                .text(&clipped);
-            if row.control_id.is_some() {
-                w.close();
+                emit_screen_row(w, s, r, row, r.x + pad_x, y, font_px, row_h);
             }
         }
 
@@ -547,8 +521,229 @@ impl Skin for WireframeSkin {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn emit_screen_row(
+    w: &mut SvgWriter,
+    s: &Screen<'_>,
+    r: Rect,
+    row: &crate::skin::ScreenRow<'_>,
+    x: f64,
+    y: f64,
+    font_px: f64,
+    row_h: f64,
+) {
+    let prefix = match (row.signal, row.critical) {
+        (Some(sig), true) => format!("{} [C] ", sig.symbol()),
+        (Some(sig), false) => format!("{} ", sig.symbol()),
+        (None, true) => "[C] ".to_owned(),
+        (None, false) => String::new(),
+    };
+    let full = format!("{prefix}{}", row.text);
+    let clipped = truncate_chars(&full, s.cols.max(1));
+    if let Some(cid) = row.control_id {
+        w.tag("g")
+            .attr("data-control-id", cid)
+            .attr("role", "button")
+            .attr("tabindex", 0_u32)
+            .attr("aria-selected", if row.selected { "true" } else { "false" })
+            .open();
+        if row.selected {
+            w.tag("rect")
+                .attr("x", r.x + 2.0)
+                .attr("y", (y - font_px).max(r.y + 1.0))
+                .attr("width", (r.w - 4.0).max(1.0))
+                .attr("height", row_h.min((r.bottom() - y + font_px).max(1.0)))
+                .attr("fill", "#1b2433")
+                .end();
+        }
+    }
+    w.tag("text")
+        .attr("x", x)
+        .attr("y", y)
+        .attr("fill", row.tone.wireframe_fg())
+        .attr("font-family", s.font_family)
+        .attr("font-size", font_px)
+        .text(&clipped);
+    if row.control_id.is_some() {
+        w.close();
+    }
+}
+
+#[allow(clippy::cast_precision_loss, clippy::too_many_arguments)]
+fn draw_integrated_trainway(
+    w: &mut SvgWriter,
+    s: &Screen<'_>,
+    r: Rect,
+    font_px: f64,
+    row_h: f64,
+    max_rows: usize,
+    pad_x: f64,
+    pad_y: f64,
+) {
+    let mut emitted_rows = 0_usize;
+
+    // 1. Top telemetry header row (s.lines[0]).
+    let hdr_y = r.y + pad_y + 0.8 * row_h;
+    if let Some(first) = s.lines.first() {
+        emit_screen_row(w, s, r, first, r.x + pad_x, hdr_y, font_px, row_h);
+        emitted_rows += 1;
+    }
+    let sep_top_y = (r.y + pad_y + row_h + 4.0).min(r.bottom() - 4.0);
+    w.tag("path")
+        .attr(
+            "d",
+            PathData::new()
+                .m(r.x + 4.0, sep_top_y)
+                .h(r.right() - 4.0)
+                .build(),
+        )
+        .attr("stroke", "#1f2633")
+        .attr("stroke-width", 1.0)
+        .end();
+
+    // 2. Station column headers + vertical dashed guide lines.
+    let n_st = s.stations.len().max(1);
+    let left = r.x + 28.0;
+    let right = (r.right() - 28.0).max(left + 10.0);
+    let span = (right - left) / n_st.saturating_sub(1).max(1) as f64;
+    let st_hdr_y = (sep_top_y + 15.0).min(r.bottom() - 20.0);
+
+    let footer_start = (1 + s.tracks.len()).min(s.lines.len());
+    let footer_count = s
+        .lines
+        .len()
+        .saturating_sub(footer_start)
+        .min(max_rows.saturating_sub(1 + s.tracks.len()));
+    let footer_h = if footer_count > 0 {
+        (footer_count as f64) * (row_h + 2.0) + 10.0
+    } else {
+        8.0
+    };
+    let track_top = (st_hdr_y + 10.0).min(r.bottom() - footer_h - 16.0);
+    let track_bottom = (r.bottom() - footer_h - 6.0).max(track_top + 20.0);
+
+    for (i, &st_lbl) in s.stations.iter().enumerate() {
+        let sx = left + i as f64 * span;
+        let guide = PathData::new()
+            .m(sx, st_hdr_y + 4.0)
+            .v(track_bottom)
+            .build();
+        w.tag("path")
+            .attr("d", guide)
+            .attr("stroke", "#18202c")
+            .attr("stroke-width", 1.0)
+            .attr("stroke-dasharray", "2 4")
+            .end();
+        let display_lbl = if span < 62.0 {
+            match st_lbl {
+                "CLIPPY" => "CLIP",
+                "AUDIT" => "AUDT",
+                "BENCH" => "BNCH",
+                "RELEASE" => "REL",
+                "MERGE" => "MERG",
+                other => other,
+            }
+        } else {
+            st_lbl
+        };
+        w.tag("text")
+            .attr("x", sx)
+            .attr("y", st_hdr_y)
+            .attr("text-anchor", "middle")
+            .attr("fill", TEXT_MUTED)
+            .attr("font-family", s.font_family)
+            .attr("font-size", (font_px - 2.0).max(10.0))
+            .attr("data-pager", "station-hdr")
+            .text(display_lbl);
+    }
+
+    // 3. Integrated track bands: each track gets its label directly above its schematic line.
+    let n_tracks = s.tracks.len().max(1);
+    let band_h = ((track_bottom - track_top) / n_tracks as f64).max(22.0);
+    let mut trunk_y = track_top + 0.65 * band_h;
+
+    for (idx, tr) in s.tracks.iter().enumerate() {
+        let ty = (track_top + (idx as f64 + 0.68) * band_h).min(track_bottom - 4.0);
+        if idx == 0 {
+            trunk_y = ty;
+        }
+        let label_y = (ty - 10.0).max(st_hdr_y + 12.0);
+        if emitted_rows < max_rows {
+            if let Some(row) = s.lines.get(1 + idx) {
+                emit_screen_row(w, s, r, row, r.x + pad_x, label_y, font_px, row_h);
+                emitted_rows += 1;
+            }
+        }
+
+        let fork_x =
+            left + f64::from(tr.fork_stage.min(u32::try_from(n_st - 1).unwrap_or(0))) * span;
+        let path = if idx == 0 || tr.lane == 0 {
+            PathData::new().m(left, ty).h(right).build()
+        } else {
+            PathData::new()
+                .m(fork_x, trunk_y)
+                .q(fork_x + 10.0, ty, (fork_x + 22.0).min(right), ty)
+                .h(right)
+                .build()
+        };
+        let stroke = if tr.node_lost {
+            COLOR_FAIL
+        } else if tr.fading {
+            TEXT_MUTED
+        } else if idx == 0 || tr.lane == 0 {
+            COLOR_PASS
+        } else {
+            COLOR_INFO
+        };
+        w.tag("path")
+            .attr("d", path)
+            .attr("fill", "none")
+            .attr("stroke", stroke)
+            .attr(
+                "stroke-width",
+                if idx == 0 || tr.lane == 0 { 2.2 } else { 1.6 },
+            )
+            .attr_opt("stroke-dasharray", tr.dashed.then_some("5 3"))
+            .attr("data-track-ref", tr.ref_name)
+            .end();
+
+        for &(st_idx, glyph, tone) in tr.signals {
+            let sx = left + f64::from(st_idx) * span;
+            render_signal_shape(w, sx, ty, glyph, tone);
+        }
+    }
+
+    // 4. Footer rows (YARD +N, INTERCHANGE ⇄ ...).
+    if footer_count > 0 {
+        let sep_bot_y = (r.bottom() - footer_h).max(track_top);
+        w.tag("path")
+            .attr(
+                "d",
+                PathData::new()
+                    .m(r.x + 4.0, sep_bot_y)
+                    .h(r.right() - 4.0)
+                    .build(),
+            )
+            .attr("stroke", "#1f2633")
+            .attr("stroke-width", 1.0)
+            .end();
+        for (fi, row) in s
+            .lines
+            .iter()
+            .skip(footer_start)
+            .take(max_rows.saturating_sub(emitted_rows))
+            .enumerate()
+        {
+            let fy = sep_bot_y + 4.0 + (fi as f64 + 0.8) * row_h;
+            if fy <= r.bottom() - 4.0 {
+                emit_screen_row(w, s, r, row, r.x + pad_x, fy, font_px, row_h);
+            }
+        }
+    }
+}
+
 #[allow(clippy::cast_precision_loss)]
-fn draw_tracks(w: &mut SvgWriter, r: Rect, stations: &[&str], tracks: &[ScreenTrack<'_>]) {
+fn draw_tracks_compact(w: &mut SvgWriter, r: Rect, stations: &[&str], tracks: &[ScreenTrack<'_>]) {
     let n_st = stations.len().max(1);
     let left = r.x + 24.0;
     let right = (r.right() - 24.0).max(left + 10.0);

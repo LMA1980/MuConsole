@@ -289,8 +289,29 @@ fn u4_scorecard_carousel_orders_parent_first_then_gitmodules_and_pages_cleanly()
     assert_eq!(ordered[6].id, RepoId::new("fixture", "arch-synthetic"));
     assert_eq!(ordered[7].id, RepoId::new("fixture", "manager"));
 
-    // Step carousel pages and verify rendered page indicator updates.
+    // Step carousel pages and verify rendered page indicator updates and zero truncation in C4 half-cards.
     assert_eq!(st.carousel_page, 0);
+    let svg_p0 = render_console(
+        &WireframeSkin,
+        &st,
+        Viewport::new(1512.0, 860.0),
+        SafeArea::ZERO,
+    );
+    let doc_p0 = roxmltree::Document::parse(&svg_p0).expect("valid XML");
+    for node in doc_p0.descendants() {
+        if let Some(cid) = node.attribute("data-control-id") {
+            if cid.starts_with("c4-ci-card-") || cid.starts_with("c4-cd-card-") {
+                for tnode in node.descendants().filter(|n| n.has_tag_name("text")) {
+                    let txt = tnode.text().unwrap_or("");
+                    assert!(
+                        !txt.contains('…'),
+                        "C4 half-card {cid} line '{txt}' must not truncate values with '…'"
+                    );
+                }
+            }
+        }
+    }
+
     st.step_carousel(1, 3);
     assert_eq!(st.carousel_page, 1);
     let svg = render_console(
@@ -545,6 +566,16 @@ fn u7_font_toggle_dyslexic_reflow_phone_touch_targets_html_shell_and_skin_parity
     assert!(html.contains("font-size:16px"));
     assert!(html.contains("OpenDyslexicMNerdFontMono-Regular.woff2"));
 
+    st.set_font(CrtFont::Hurmit);
+    st.phone_rotary_open = false;
+    let svg_phone_default = render_console(
+        &WireframeSkin,
+        &st,
+        Viewport::new(402.0, 720.0),
+        SafeArea::ZERO,
+    );
+    assert_svg_zero_overflow(&svg_phone_default, 402.0, 720.0, "u7_phone_default");
+
     st.phone_rotary_open = true;
     let svg_phone = render_console(
         &WireframeSkin,
@@ -630,7 +661,15 @@ fn u7_font_toggle_dyslexic_reflow_phone_touch_targets_html_shell_and_skin_parity
             wrap(&svg_dys, 1512, 860),
         )
         .expect("write dyslexic html");
-        std::fs::write(p.join("wireframe_mobile.html"), wrap(&svg_phone, 402, 720))
-            .expect("write mobile html");
+        std::fs::write(
+            p.join("wireframe_mobile.html"),
+            wrap(&svg_phone_default, 402, 720),
+        )
+        .expect("write mobile html");
+        std::fs::write(
+            p.join("wireframe_mobile_rotary.html"),
+            wrap(&svg_phone, 402, 720),
+        )
+        .expect("write mobile rotary html");
     }
 }
