@@ -12,10 +12,12 @@
 #![forbid(unsafe_code)]
 
 pub mod grid;
+pub mod trainway;
 
 pub use grid::{solve_grid, truncate, CrtGrid, GridSpec};
 pub use muconsole_protocol::Area;
 pub use muconsole_theme::instruments::Rect;
+pub use trainway::{allocate_lanes, AllocatedLane, TrainwayLayout};
 
 use muconsole_theme::metrics::{CrtFontMetrics, CRT_FLOOR_DESKTOP_PX, CRT_FLOOR_PHONE_PX};
 
