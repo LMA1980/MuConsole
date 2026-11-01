@@ -10,8 +10,13 @@
 #[cfg(target_arch = "wasm32")]
 pub mod boot;
 pub mod client;
+pub mod components;
+pub mod router;
+pub mod state;
 
 pub use client::{reload_banner_text, ClientUpdate, DataClient, WORKER_URL};
+pub use components::{render_console, render_html_shell};
+pub use state::ConsoleState;
 
 use muconsole_layout::{solve, Area, Frames, SafeArea, Viewport};
 use muconsole_theme::defs::write_defs;
