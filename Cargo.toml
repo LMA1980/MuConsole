@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/muconsole-protocol",
+    "crates/muconsole-theme",
+    "crates/muconsole-layout",
+    "crates/muconsole-ui",
+    "crates/muconsole-data",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/LMA1980/MuConsole"
+authors = ["LMA1980"]
+
+[workspace.dependencies]
+muconsole-protocol = { path = "crates/muconsole-protocol" }
+muconsole-theme = { path = "crates/muconsole-theme" }
+muconsole-layout = { path = "crates/muconsole-layout" }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+roxmltree = "0.20"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
