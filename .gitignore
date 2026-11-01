@@ -1,5 +1,5 @@
 /target
-/dist/
+/dist/fonts/
 .DS_Store
 **/*.rs.bk
 # Font binaries are never committed (HeavyData is freeware, not OFL).
