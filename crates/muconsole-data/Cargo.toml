@@ -1,0 +1,11 @@
+[package]
+name = "muconsole-data"
+description = "MuConsole data module (dedicated Web Worker WASM): fetch, SSE, store and diffing; bootstrap lands in Phase 2"
+license = "AGPL-3.0-only"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+muconsole-protocol = { workspace = true }

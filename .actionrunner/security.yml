@@ -1,0 +1,50 @@
+default_profile: "ci-default"
+profiles:
+  strict-offline:
+    backend: Kernel
+    read_paths:
+      - /usr
+      - /bin
+      - /lib
+      - /var/lib/action-runner
+    write_paths:
+      - /var/lib/action-runner/workspaces
+      - /tmp
+    exec_paths:
+      - /usr/bin
+      - /usr/local/bin
+      - /bin
+      - /var/lib/action-runner/.cargo/bin
+      - /var/lib/action-runner/.rustup
+      - /var/lib/action-runner/.local/bin
+    network_egress_cidrs: []
+    memlock_limit_kb: 65536
+    max_pids: 256
+    max_memory_mb: 8192
+    cpu_affinity_mask: 255
+    require_set_ai_thread: false
+
+  ci-default:
+    backend: Kernel
+    read_paths:
+      - /usr
+      - /bin
+      - /lib
+      - /etc/ssl
+      - /var/lib/action-runner
+    write_paths:
+      - /var/lib/action-runner/workspaces
+      - /tmp
+    exec_paths:
+      - /usr/bin
+      - /usr/local/bin
+      - /bin
+      - /var/lib/action-runner/.cargo/bin
+      - /var/lib/action-runner/.rustup
+      - /var/lib/action-runner/.local/bin
+    network_egress_cidrs: []
+    memlock_limit_kb: 65536
+    max_pids: 256
+    max_memory_mb: 12288
+    cpu_affinity_mask: 255
+    require_set_ai_thread: false
