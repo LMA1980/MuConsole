@@ -1,0 +1,23 @@
+version: "2"
+name: "MuConsole Release Pipeline"
+
+stages:
+  - id: fmt-check
+    name: "Verify Rust Formatting"
+    tags: ["fmt"]
+    threads: 2
+    run: "cargo fmt --all -- --check"
+
+  - id: clippy-check
+    name: "Verify Rust Linter & Clippy Rules"
+    tags: ["clippy"]
+    depends_on: ["fmt-check"]
+    threads: 4
+    run: "cargo clippy --workspace --all-targets -- -D warnings"
+
+  - id: wasm32-build
+    name: "Validate WASM32 Build"
+    tags: ["build"]
+    depends_on: ["clippy-check"]
+    threads: 4
+    run: "cargo build --target wasm32-unknown-unknown --release -p muconsole-ui -p muconsole-data -p muconsole-protocol -p muconsole-theme"
