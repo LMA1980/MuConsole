@@ -23,5 +23,7 @@ pub mod instruments;
 pub mod interaction;
 pub mod lcd;
 pub mod metrics;
+pub mod skin;
 pub mod svg;
 pub mod tokens;
+pub mod wireframe;

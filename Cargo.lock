@@ -124,10 +124,12 @@ name = "muconsole-ui"
 version = "0.1.0"
 dependencies = [
  "js-sys",
+ "muconsole-data",
  "muconsole-layout",
  "muconsole-protocol",
  "muconsole-theme",
  "postcard",
+ "roxmltree",
  "wasm-bindgen",
  "web-sys",
 ]

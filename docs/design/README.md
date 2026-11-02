@@ -233,9 +233,12 @@ Intensity: **Full** (bloom, scanlines, blink, faint flicker ≤ 2 %, track-build
 
 ## 6. Build, Caching & Deployment
 
-- Trunk builds the UI crate and the worker (`data-type="worker"`). `scripts/build-dist.sh` hashes both `.wasm` files and the worker JS and injects `?v=<hash>`.
-- Reverse proxy: `no-cache, no-store, must-revalidate` on the HTML entry point; `etag on` plus `no-cache, must-revalidate` on WASM / JS / CSS.
-- 3-phase migration: (1) MuConsole at `/console/` beside ActionRunner-web at `/`; (2) after verification MuConsole moves to `/` and ActionRunner-web to `/legacy/` with deep-link redirects; (3) `/legacy/` is removed and ActionRunner-web archived.
+- `scripts/build-dist.sh` builds both WASM modules (`muconsole-ui` on the main thread and `muconsole-data` in the dedicated Web Worker), copies `tokens.css` and the subsetted `dist/fonts/*.woff2` bundle, and injects content-hash `?v=<hash>` query parameters into `dist/index.html` and `dist/muconsole-data_loader.js`.
+- Reverse proxy (`nginx/muconsole.conf`): `no-cache, no-store, must-revalidate` on the HTML entry point; `etag on` plus `no-cache, must-revalidate` on WASM / JS / CSS / WOFF2 assets.
+- **Parallel dedicated-host deployment**:
+  - `MuConsole` is hosted at `/` on `https://console.lma1980.duckdns.org` in parallel with `ActionRunner-web` on `https://hook.lma1980.duckdns.org`.
+  - The GitHub webhook ingress (`POST /webhook`) permanently remains exclusively on `https://hook.lma1980.duckdns.org` (`console.lma1980.duckdns.org` returns `404` on `/webhook`).
+  - Both web clients run side-by-side indefinitely so operators can verify zero feature loss without forcing a premature cut-over decision.
 
 ## 7. Verification
 

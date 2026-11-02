@@ -13,7 +13,7 @@
 
 ______________________________________________________________________
 
-Unified CI/CD console for **ActionRunner** (continuous integration) and **MuConDe** (continuous delivery). MuConsole is an SVG-first "Avionics Terminal" UI driven by two WebAssembly modules: a UI module on the main thread and a data module in a dedicated Web Worker. It will replace `ActionRunner-web` through a 3-phase side-by-side migration.
+Unified CI/CD console for **ActionRunner** (continuous integration) and **MuConDe** (continuous delivery). MuConsole is an SVG-first "Avionics Terminal" UI driven by two WebAssembly modules: a UI module on the main thread and a data module in a dedicated Web Worker. It is hosted on `https://console.lma1980.duckdns.org` in parallel with `ActionRunner-web` on `https://hook.lma1980.duckdns.org` (where the GitHub `POST /webhook` endpoint permanently remains) so both clients can be evaluated side-by-side without loss of functionality.
 
 See the [design specification](docs/design/README.md).
 
