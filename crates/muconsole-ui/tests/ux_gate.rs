@@ -300,7 +300,7 @@ fn u4_scorecard_carousel_orders_parent_first_then_gitmodules_and_pages_cleanly()
     let doc_p0 = roxmltree::Document::parse(&svg_p0).expect("valid XML");
     for node in doc_p0.descendants() {
         if let Some(cid) = node.attribute("data-control-id") {
-            if cid.starts_with("c4-ci-card-") || cid.starts_with("c4-cd-card-") {
+            if cid.starts_with("c4-card-") {
                 for tnode in node.descendants().filter(|n| n.has_tag_name("text")) {
                     let txt = tnode.text().unwrap_or("");
                     assert!(

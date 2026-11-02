@@ -108,7 +108,7 @@ fn render_c1_nav(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, frame
     let opts = [
         SelectorOption {
             id: "ovr",
-            label: "OVR",
+            label: "OVERVIEW",
             badge: (badges.overview > 0).then_some(badges.overview),
             tone: SemanticTone::Info,
         },
@@ -134,7 +134,7 @@ fn render_c1_nav(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, frame
         },
         SelectorOption {
             id: "flt",
-            label: "FLT",
+            label: "FLEET",
             badge: (badges.fleet > 0).then_some(badges.fleet),
             tone: if badges.fleet > 0 {
                 SemanticTone::Fail
@@ -200,9 +200,9 @@ fn render_c2_top_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, f
 
     let inner = clamp_rect(r.inset(4.0, 6.0, 4.0, 6.0), r);
     let right_reserve = if frames.breakpoint == Breakpoint::Phone {
-        164.0_f64.min(inner.w * 0.55)
+        218.0_f64.min(inner.w * 0.58)
     } else {
-        320.0_f64.min(inner.w * 0.48)
+        436.0_f64.min(inner.w * 0.52)
     };
 
     // Breadcrumb segments on the left.
@@ -220,12 +220,26 @@ fn render_c2_top_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, f
             ),
             inner,
         );
+        let (lbl, val) = if frames.breakpoint == Breakpoint::Phone {
+            match c.id {
+                "c2-area" => ("", c.value.as_str()),
+                "c2-repo" => (
+                    "",
+                    c.value
+                        .rsplit_once('/')
+                        .map_or(c.value.as_str(), |(_, repo_name)| repo_name),
+                ),
+                _ => (c.label, c.value.as_str()),
+            }
+        } else {
+            (c.label, c.value.as_str())
+        };
         skin.readout(
             w,
             &Readout {
                 control_id: c.id,
-                label: c.label,
-                value: &c.value,
+                label: lbl,
+                value: val,
                 rect: cr,
                 tone: SemanticTone::Info,
                 interactive: c.id != "c2-ellipsis",
@@ -235,7 +249,7 @@ fn render_c2_top_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, f
 
     let rx = (inner.right() - right_reserve).max(inner.x);
     if frames.breakpoint == Breakpoint::Phone {
-        let trigger_w = (right_reserve * 0.52).max(48.0);
+        let trigger_w = 70.0_f64.min(right_reserve * 0.34).max(48.0);
         let trigger_rect = clamp_rect(
             Rect::new(
                 rx,
@@ -249,8 +263,8 @@ fn render_c2_top_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, f
             w,
             &Readout {
                 control_id: "c3-phone-trigger",
-                label: "REPO",
-                value: "SELECT",
+                label: "",
+                value: "▾ REPO",
                 rect: trigger_rect,
                 tone: SemanticTone::Warn,
                 interactive: true,
@@ -275,7 +289,8 @@ fn render_c2_top_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, f
             .is_some_and(RepoTopology::stop);
         let reload = state.client.reload_required().is_some();
 
-        let lamp_w = ((right_reserve - 116.0) / 3.0).clamp(36.0, 68.0);
+        let font_w = 212.0_f64.min(right_reserve * 0.50).max(80.0);
+        let lamp_w = ((right_reserve - font_w - 16.0) / 3.0).clamp(48.0, 72.0);
         let lamps = [
             (
                 "lamp-stale",
@@ -303,7 +318,7 @@ fn render_c2_top_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, f
             );
         }
 
-        let font_x = (inner.right() - 104.0).max(rx);
+        let font_x = (inner.right() - font_w).max(rx);
         let font_rect = clamp_rect(
             Rect::new(font_x, inner.y, (inner.right() - font_x).max(48.0), inner.h),
             inner,
@@ -316,13 +331,13 @@ fn render_font_switch(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, 
     let opts = [
         SelectorOption {
             id: "hurmit",
-            label: "HUR",
+            label: "Standard font",
             badge: None,
             tone: SemanticTone::Info,
         },
         SelectorOption {
             id: "dyslexic",
-            label: "DYS",
+            label: "Dyslexia-friendly font",
             badge: None,
             tone: SemanticTone::Pass,
         },
@@ -335,7 +350,7 @@ fn render_font_switch(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, 
         w,
         &Selector {
             control_id: "c2-font-switch",
-            label: "CRT Reading Font Selector",
+            label: "Use dyslexia-friendly font",
             rect,
             action: SwitchAction::Maintained,
             options: &opts,
@@ -497,13 +512,13 @@ fn render_c4_carousel(
         let step_opts = [
             SelectorOption {
                 id: "prev",
-                label: "◀",
+                label: "◀ PREV",
                 badge: None,
-                tone: SemanticTone::Neutral,
+                tone: SemanticTone::Info,
             },
             SelectorOption {
                 id: "next",
-                label: "▶",
+                label: "NEXT ▶",
                 badge: None,
                 tone: SemanticTone::Info,
             },
@@ -524,7 +539,18 @@ fn render_c4_carousel(
     }
 
     let dots_rect = clamp_rect(carousel.dots, frames.canvas);
-    let dots_val = format!("{}/{}", page + 1, total_pages);
+    let mut dot_glyphs = String::new();
+    for p in 0..total_pages {
+        if p > 0 {
+            dot_glyphs.push(' ');
+        }
+        dot_glyphs.push(if p == page { '●' } else { '○' });
+    }
+    let dots_val = format!(
+        "{}/{total_pages}  {dot_glyphs}  (Page {} of {total_pages})",
+        page + 1,
+        page + 1
+    );
     skin.readout(
         w,
         &Readout {
@@ -547,7 +573,7 @@ fn render_c4_carousel(
                 let sub = if r.submodules.is_empty() {
                     ""
                 } else {
-                    " [SUB]"
+                    " · SUBMODULES"
                 };
                 format!("{}/{}{sub}", r.id.owner, r.id.repo)
             },
@@ -594,15 +620,15 @@ fn render_twin_scorecard(
         1..=69 => 'D',
         _ => '-',
     };
-    let l0 = repo.id.repo.clone();
+    let l0 = "CI · QUALITY".to_owned();
     let l1 = format!("{st_tag} {:>2}/100 {grade}", repo.score.min(99));
     let l2 = format!(
-        "C:{:>2}% {:+.1}%",
+        "COV {:>2}% {:+.1}%",
         (repo.coverage_bp / 100).min(99),
         f64::from(repo.bench_delta_bp) / 100.0
     );
     let l3 = format!(
-        "S:{} JOB:#{}",
+        "SUB {} #{}",
         repo.submodules.len(),
         repo.latest_job_id.unwrap_or(0)
     );
@@ -676,30 +702,30 @@ fn render_twin_scorecard(
     let (r0, r1, r2, r3, r4, cd_tone) = match repo.cd.as_ref() {
         Some(cd) => {
             let (tone, gate_tag, crit_tag, ttl_tag) = match cd.outcome {
-                GateOutcome::Promoted => (SemanticTone::Pass, "PROMOTED", "OK", "TTL: LIVE"),
-                GateOutcome::Pending => (SemanticTone::Warn, "PENDING", "OK", "TTL: 142s"),
-                GateOutcome::RolledBack => (SemanticTone::Fail, "ROLLBACK", "FL", "TTL: REV"),
-                GateOutcome::Tainted => (SemanticTone::Fail, "TAINTED", "FL", "TTL: HALT"),
+                GateOutcome::Promoted => (SemanticTone::Pass, "PROMOTED", "OK", "LEASE: LIVE"),
+                GateOutcome::Pending => (SemanticTone::Warn, "PENDING", "OK", "LEASE: 142s"),
+                GateOutcome::RolledBack => (SemanticTone::Fail, "ROLLBACK", "FL", "LEASE: REV"),
+                GateOutcome::Tainted => (SemanticTone::Fail, "TAINTED", "FL", "LEASE: HALT"),
             };
             (
-                format!("DEP {}", cd.deployment_id),
+                format!("CD · {}", cd.deployment_id),
                 format!(
                     "SLOT {:?}->{:?} STG",
                     cd.active_slot,
                     cd.active_slot.other()
                 ),
                 format!("GATE: {gate_tag}"),
-                format!("IT:{}/{} CRT:{crit_tag}", cd.it_passed, cd.it_total),
+                format!("IT {}/{} CRIT:{crit_tag}", cd.it_passed, cd.it_total),
                 ttl_tag.to_owned(),
                 tone,
             )
         }
         None => (
-            "CD: NO DEPLOY".to_owned(),
+            "CD · NO DEPLOY".to_owned(),
             "SLOT: NONE".to_owned(),
             "GATE: IDLE".to_owned(),
-            "IT: 0/0 CRT:--".to_owned(),
-            "TTL: —".to_owned(),
+            "IT 0/0 CRIT:--".to_owned(),
+            "LEASE: —".to_owned(),
             SemanticTone::Neutral,
         ),
     };
@@ -801,7 +827,11 @@ fn render_c5_trainway(
         w,
         &Panel {
             id: "c5-trainway-panel",
-            title: "CI BRANCH & PR TRAINWAY",
+            title: if rect.w < 500.0 {
+                "CI TRAINWAY"
+            } else {
+                "CI BRANCH & PR TRAINWAY"
+            },
             rect,
             role: Some("region"),
             aria_label: Some("CI Branch and PR Trainway"),
@@ -818,7 +848,11 @@ fn render_c5_trainway(
     let right = rect.right() - 6.0;
 
     // Guarded PullToTurn RESTART switch.
-    let rst_w = 88.0_f64.min(rect.w * 0.25);
+    let rst_w = if rect.w < 500.0 {
+        116.0_f64.min(rect.w * 0.30)
+    } else {
+        136.0_f64.min(rect.w * 0.32)
+    };
     let rst_rect = clamp_rect(
         Rect::new((right - rst_w).max(rect.x), hdr_y, rst_w, hdr_h),
         rect,
@@ -826,16 +860,18 @@ fn render_c5_trainway(
     let rst_opts = [
         SelectorOption {
             id: "norm",
-            label: "NORM",
+            label: "READY",
             badge: None,
             tone: SemanticTone::Neutral,
         },
         SelectorOption {
             id: "rst",
             label: if state.restart_armed_until_ms.is_some() {
-                "ARM!"
+                "CONFIRM!"
+            } else if rst_w < 124.0 {
+                "RESTART"
             } else {
-                "RST"
+                "HOLD RST"
             },
             badge: None,
             tone: SemanticTone::Warn,
@@ -845,7 +881,7 @@ fn render_c5_trainway(
         w,
         &Selector {
             control_id: "c5-restart-switch",
-            label: "Guarded Trainway Restart Switch",
+            label: "Guarded Trainway Restart Switch (Hold 300ms to arm)",
             rect: rst_rect,
             action: SwitchAction::PullToTurn,
             options: &rst_opts,
@@ -856,7 +892,7 @@ fn render_c5_trainway(
     );
 
     // LIVE toggle.
-    let live_w = 56.0_f64.min(rect.w * 0.18);
+    let live_w = 78.0_f64.min(rect.w * 0.20);
     let live_rect = clamp_rect(
         Rect::new(
             (rst_rect.x - live_w - 4.0).max(rect.x),
@@ -872,9 +908,9 @@ fn render_c5_trainway(
             control_id: "c5-live-toggle",
             label: "",
             value: if state.trainway_live {
-                "LIVE●"
+                "● LIVE"
             } else {
-                "HOLD"
+                "○ PAUSED"
             },
             rect: live_rect,
             tone: if state.trainway_live {
@@ -887,7 +923,7 @@ fn render_c5_trainway(
     );
 
     // STOP lamp.
-    let stop_w = 52.0_f64.min(rect.w * 0.16);
+    let stop_w = 58.0_f64.min(rect.w * 0.16);
     let stop_rect = clamp_rect(
         Rect::new(
             (live_rect.x - stop_w - 4.0).max(rect.x),

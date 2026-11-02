@@ -149,9 +149,90 @@ impl Skin for WireframeSkin {
         w.close();
     }
 
-    #[allow(clippy::cast_precision_loss)]
+    #[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
     fn selector(&self, w: &mut SvgWriter, s: &Selector<'_>) {
         let r = s.rect;
+        if s.control_id == "c2-font-switch" {
+            let dyslexic_on = s.selected == 1;
+            let border = if dyslexic_on { COLOR_PASS } else { "#3d5270" };
+            let bg = if dyslexic_on { "#122b22" } else { "#182232" };
+            w.tag("g")
+                .attr("data-control-id", s.control_id)
+                .attr("data-bbox-x", r.x)
+                .attr("data-bbox-y", r.y)
+                .attr("data-bbox-w", r.w)
+                .attr("data-bbox-h", r.h)
+                .attr("role", "switch")
+                .attr("aria-checked", if dyslexic_on { "true" } else { "false" })
+                .attr("aria-label", "Use dyslexia-friendly font")
+                .attr("tabindex", 0_u32)
+                .open();
+            w.tag("rect")
+                .attr("x", r.x)
+                .attr("y", r.y)
+                .attr("width", r.w)
+                .attr("height", r.h)
+                .attr("rx", (r.h * 0.45).min(12.0))
+                .attr("fill", bg)
+                .attr("stroke", border)
+                .attr("stroke-width", 1.5)
+                .end();
+
+            // Checkbox / switch indicator box on the left.
+            let box_sz = (r.h - 14.0).clamp(14.0, 18.0);
+            let box_x = r.x + 8.0;
+            let box_y = r.y + (r.h - box_sz) * 0.5;
+            w.tag("rect")
+                .attr("x", box_x)
+                .attr("y", box_y)
+                .attr("width", box_sz)
+                .attr("height", box_sz)
+                .attr("rx", 4.0)
+                .attr("fill", if dyslexic_on { COLOR_PASS } else { BG_SCREEN })
+                .attr("stroke", if dyslexic_on { COLOR_PASS } else { "#6e8299" })
+                .attr("stroke-width", 1.5)
+                .end();
+            if dyslexic_on {
+                let ck = PathData::new()
+                    .m(box_x + 3.5, box_y + box_sz * 0.52)
+                    .l(box_x + box_sz * 0.42, box_y + box_sz - 3.5)
+                    .l(box_x + box_sz - 3.0, box_y + 3.5)
+                    .build();
+                w.tag("path")
+                    .attr("d", ck)
+                    .attr("fill", "none")
+                    .attr("stroke", "#06140d")
+                    .attr("stroke-width", 2.2)
+                    .end();
+            }
+
+            let label_x = box_x + box_sz + 6.0;
+            let avail_w = (r.right() - label_x - 5.0).max(20.0);
+            let (raw_lbl, f_sz) = if avail_w >= 148.0 {
+                ("Dyslexia-friendly font", 11.5)
+            } else {
+                ("Dyslexia font", 11.0)
+            };
+            let lbl = fit_box(raw_lbl, avail_w, f_sz);
+            w.tag("text")
+                .attr("x", label_x)
+                .attr("y", r.y + r.h * 0.5 + 4.0)
+                .attr(
+                    "fill",
+                    if dyslexic_on {
+                        COLOR_PASS
+                    } else {
+                        TEXT_PRIMARY
+                    },
+                )
+                .attr("font-family", "MuCRT, monospace")
+                .attr("font-size", f_sz)
+                .attr("font-weight", "bold")
+                .text(&lbl);
+            w.close();
+            return;
+        }
+
         let role = match s.action {
             SwitchAction::Maintained => "radiogroup",
             SwitchAction::SpringReturn | SwitchAction::PullToTurn => "group",
@@ -171,10 +252,24 @@ impl Skin for WireframeSkin {
             .attr("y", r.y)
             .attr("width", r.w)
             .attr("height", r.h)
-            .attr("rx", 4.0)
-            .attr("fill", BG_CONTROL)
-            .attr("stroke", if s.pulled { COLOR_WARN } else { BORDER })
-            .attr("stroke-width", 1.0)
+            .attr("rx", 5.0)
+            .attr(
+                "fill",
+                if s.action == SwitchAction::PullToTurn {
+                    "#261c14"
+                } else {
+                    BG_CONTROL
+                },
+            )
+            .attr(
+                "stroke",
+                if s.pulled || s.action == SwitchAction::PullToTurn {
+                    COLOR_WARN
+                } else {
+                    BORDER
+                },
+            )
+            .attr("stroke-width", 1.2)
             .end();
 
         let n = s.options.len().max(1);
@@ -189,42 +284,73 @@ impl Skin for WireframeSkin {
                 let ch = inner.h / n as f64;
                 Rect::new(inner.x, inner.y + i as f64 * ch, inner.w, ch)
             };
+            let is_button_group = s.action != SwitchAction::Maintained;
             let stroke = if active {
                 opt.tone.wireframe_stroke()
+            } else if is_button_group {
+                "#3d5270"
             } else {
                 BORDER
             };
-            let fill = if active { "#232c3d" } else { BG_PANEL };
+            let fill = if active {
+                if s.action == SwitchAction::PullToTurn && i == 1 {
+                    "#3b2314"
+                } else {
+                    "#1f3452"
+                }
+            } else if is_button_group {
+                "#182232"
+            } else {
+                BG_PANEL
+            };
             let opt_id = format!("{}:{}", s.control_id, opt.id);
             w.tag("g")
                 .attr("data-control-id", opt_id)
                 .attr("data-option-index", i)
-                .attr(
-                    "role",
-                    if s.action == SwitchAction::Maintained {
-                        "radio"
-                    } else {
-                        "button"
-                    },
-                )
+                .attr("role", if is_button_group { "button" } else { "radio" })
                 .attr("aria-checked", if active { "true" } else { "false" })
                 .attr("aria-label", opt.label)
                 .open();
             w.tag("rect")
-                .attr("x", cell.x + 1.0)
-                .attr("y", cell.y + 1.0)
-                .attr("width", (cell.w - 2.0).max(1.0))
-                .attr("height", (cell.h - 2.0).max(1.0))
-                .attr("rx", 3.0)
+                .attr("x", cell.x + 1.5)
+                .attr("y", cell.y + 1.5)
+                .attr("width", (cell.w - 3.0).max(1.0))
+                .attr("height", (cell.h - 3.0).max(1.0))
+                .attr("rx", if is_button_group { 5.0 } else { 3.5 })
                 .attr("fill", fill)
                 .attr("stroke", stroke)
-                .attr("stroke-width", if active { 1.5 } else { 1.0 })
+                .attr("stroke-width", if active { 1.8 } else { 1.0 })
                 .end();
+            // Active accent bar on maintained navigation tabs.
+            if active && !is_button_group {
+                if s.horizontal {
+                    w.tag("rect")
+                        .attr("x", cell.x + 4.0)
+                        .attr("y", cell.y + 2.0)
+                        .attr("width", (cell.w - 8.0).max(2.0))
+                        .attr("height", 2.5)
+                        .attr("fill", opt.tone.wireframe_fg())
+                        .end();
+                } else {
+                    w.tag("rect")
+                        .attr("x", cell.x + 2.0)
+                        .attr("y", cell.y + 5.0)
+                        .attr("width", 3.0)
+                        .attr("height", (cell.h - 10.0).max(2.0))
+                        .attr("fill", opt.tone.wireframe_fg())
+                        .end();
+                }
+            }
             let text_raw = match opt.badge.filter(|b| *b > 0) {
                 Some(b) => format!("{} ({b})", opt.label),
                 None => opt.label.to_owned(),
             };
-            let text = fit_box(&text_raw, cell.w, 12.0);
+            let font_sz = if cell.w < 76.0 && text_raw.len() >= 7 {
+                10.5
+            } else {
+                12.0
+            };
+            let text = fit_box(&text_raw, cell.w, font_sz);
             w.tag("text")
                 .attr("x", cell.x + cell.w * 0.5)
                 .attr("y", cell.y + cell.h * 0.5 + 4.0)
@@ -232,19 +358,23 @@ impl Skin for WireframeSkin {
                 .attr(
                     "fill",
                     if active {
-                        opt.tone.wireframe_fg()
+                        TEXT_PRIMARY
+                    } else if is_button_group {
+                        COLOR_INFO
                     } else {
                         TEXT_MUTED
                     },
                 )
                 .attr("font-family", "MuCRT, monospace")
-                .attr("font-size", 12.0)
+                .attr("font-size", font_sz)
+                .attr_opt("font-weight", active.then_some("bold"))
                 .text(&text);
             w.close();
         }
         w.close();
     }
 
+    #[allow(clippy::too_many_lines)]
     fn rotary(&self, w: &mut SvgWriter, r: &Rotary<'_>) {
         let rect = r.rect;
         w.tag("g")
@@ -268,11 +398,34 @@ impl Skin for WireframeSkin {
             .attr("stroke-width", 1.0)
             .end();
 
-        let inner = rect.inset(8.0, 8.0, 8.0, 8.0);
-        let row_h = (inner.h / 3.0).max(18.0);
+        // Panel header title on desktop/tablet (phone sheet already has its own dialog title).
+        let hdr_h = if rect.y < 120.0 {
+            let hdr_lbl = fit_box("REPOSITORY & SUBMODULE SELECTOR", rect.w - 16.0, 11.0);
+            w.tag("text")
+                .attr("x", rect.x + 10.0)
+                .attr("y", rect.y + 14.0)
+                .attr("fill", TEXT_MUTED)
+                .attr("font-family", "MuCRT, monospace")
+                .attr("font-size", 11.0)
+                .attr("font-weight", "bold")
+                .text(&hdr_lbl);
+            18.0
+        } else {
+            4.0
+        };
 
-        // Outer ring row (Repository).
-        let outer_rect = Rect::new(inner.x, inner.y, inner.w, row_h - 2.0);
+        let inner = Rect::new(
+            rect.x + 8.0,
+            rect.y + hdr_h + 4.0,
+            (rect.w - 16.0).max(40.0),
+            (rect.h - hdr_h - 10.0).max(48.0),
+        );
+        let row_h = (inner.h / 2.65).max(20.0);
+        let step_btn_w = 28.0_f64.min(inner.w * 0.14);
+        let disp_w = (inner.w - 2.0 * step_btn_w - 8.0).max(32.0);
+
+        // Outer ring row (Repository) + clickable ◀ / ▶ stepper buttons.
+        let outer_rect = Rect::new(inner.x, inner.y, inner.w, row_h - 3.0);
         w.tag("g")
             .attr("data-control-id", format!("{}:outer", r.control_id))
             .attr("role", "spinbutton")
@@ -284,12 +437,12 @@ impl Skin for WireframeSkin {
         w.tag("rect")
             .attr("x", outer_rect.x)
             .attr("y", outer_rect.y)
-            .attr("width", outer_rect.w)
+            .attr("width", disp_w)
             .attr("height", outer_rect.h)
             .attr("rx", 3.0)
             .attr("fill", BG_SCREEN)
             .attr("stroke", COLOR_INFO)
-            .attr("stroke-width", 1.0)
+            .attr("stroke-width", 1.2)
             .end();
         let outer_txt = fit_box(
             &format!(
@@ -298,7 +451,7 @@ impl Skin for WireframeSkin {
                 r.outer_total,
                 r.outer_label
             ),
-            outer_rect.w,
+            disp_w,
             12.0,
         );
         w.tag("text")
@@ -308,10 +461,34 @@ impl Skin for WireframeSkin {
             .attr("font-family", "MuCRT, monospace")
             .attr("font-size", 12.0)
             .text(&outer_txt);
+        draw_stepper_button(
+            w,
+            &format!("{}:outer-prev", r.control_id),
+            "Previous Repository",
+            "◀",
+            Rect::new(
+                outer_rect.x + disp_w + 4.0,
+                outer_rect.y,
+                step_btn_w,
+                outer_rect.h,
+            ),
+        );
+        draw_stepper_button(
+            w,
+            &format!("{}:outer-next", r.control_id),
+            "Next Repository",
+            "▶",
+            Rect::new(
+                outer_rect.x + disp_w + step_btn_w + 8.0,
+                outer_rect.y,
+                step_btn_w,
+                outer_rect.h,
+            ),
+        );
         w.close();
 
-        // Inner ring row (Submodule).
-        let sub_rect = Rect::new(inner.x, inner.y + row_h, inner.w, row_h - 2.0);
+        // Inner ring row (Submodule) + clickable ◀ / ▶ stepper buttons.
+        let sub_rect = Rect::new(inner.x, inner.y + row_h, inner.w, row_h - 3.0);
         w.tag("g")
             .attr("data-control-id", format!("{}:inner", r.control_id))
             .attr("role", "spinbutton")
@@ -323,7 +500,7 @@ impl Skin for WireframeSkin {
         w.tag("rect")
             .attr("x", sub_rect.x)
             .attr("y", sub_rect.y)
-            .attr("width", sub_rect.w)
+            .attr("width", disp_w)
             .attr("height", sub_rect.h)
             .attr("rx", 3.0)
             .attr("fill", BG_SCREEN)
@@ -332,12 +509,12 @@ impl Skin for WireframeSkin {
             .end();
         let sub_txt = fit_box(
             &format!(
-                "SUB  [{}/{}]: {}",
+                "SUBMODULE [{}/{}]: {}",
                 r.inner_index,
                 r.inner_total.saturating_sub(1),
                 r.inner_label
             ),
-            sub_rect.w,
+            disp_w,
             12.0,
         );
         w.tag("text")
@@ -347,20 +524,46 @@ impl Skin for WireframeSkin {
             .attr("font-family", "MuCRT, monospace")
             .attr("font-size", 12.0)
             .text(&sub_txt);
+        draw_stepper_button(
+            w,
+            &format!("{}:inner-prev", r.control_id),
+            "Previous Submodule",
+            "◀",
+            Rect::new(
+                sub_rect.x + disp_w + 4.0,
+                sub_rect.y,
+                step_btn_w,
+                sub_rect.h,
+            ),
+        );
+        draw_stepper_button(
+            w,
+            &format!("{}:inner-next", r.control_id),
+            "Next Submodule",
+            "▶",
+            Rect::new(
+                sub_rect.x + disp_w + step_btn_w + 8.0,
+                sub_rect.y,
+                step_btn_w,
+                sub_rect.h,
+            ),
+        );
         w.close();
 
         // Filter / status row.
-        let flt_rect = Rect::new(inner.x, inner.y + 2.0 * row_h, inner.w, row_h - 2.0);
+        let flt_y = inner.y + 2.0 * row_h;
+        let flt_h = (inner.bottom() - flt_y).max(16.0);
+        let flt_rect = Rect::new(inner.x, flt_y, inner.w, flt_h);
         let status = if !r.filter_query.is_empty() {
-            format!("/{}", r.filter_query)
+            format!("FILTER: /{}", r.filter_query)
         } else if r.settling {
-            "SETTLING (350ms)…".to_owned()
+            "APPLYING SELECTION (350ms)…".to_owned()
         } else {
-            "[/] FILTER  [↑/↓] REPO  [⇧↑/↓] SUB".to_owned()
+            "Press [/] to filter repositories by name".to_owned()
         };
         let flt_txt = fit_box(&status, flt_rect.w, 11.0);
         w.tag("text")
-            .attr("x", flt_rect.x + 6.0)
+            .attr("x", flt_rect.x + 4.0)
             .attr("y", flt_rect.y + flt_rect.h * 0.5 + 4.0)
             .attr("fill", if r.settling { COLOR_WARN } else { TEXT_MUTED })
             .attr("font-family", "MuCRT, monospace")
@@ -375,12 +578,12 @@ impl Skin for WireframeSkin {
         let stroke = if l.lit {
             l.tone.wireframe_stroke()
         } else {
-            BORDER
+            "#252d38"
         };
         let fg = if l.lit {
             l.tone.wireframe_fg()
         } else {
-            TEXT_MUTED
+            "#636e7b"
         };
         w.tag("g")
             .attr("data-control-id", l.control_id)
@@ -392,24 +595,38 @@ impl Skin for WireframeSkin {
             .attr("aria-label", l.label)
             .attr("data-lit", if l.lit { "true" } else { "false" })
             .open();
+        // Passive pill badge with internal LED dot (visually distinct from buttons).
+        let pill_h = r.h.min(24.0);
+        let pill_y = r.y + (r.h - pill_h) * 0.5;
         w.tag("rect")
             .attr("x", r.x)
-            .attr("y", r.y)
+            .attr("y", pill_y)
             .attr("width", r.w)
-            .attr("height", r.h)
-            .attr("rx", 3.0)
-            .attr("fill", if l.lit { "#1c2430" } else { BG_SCREEN })
+            .attr("height", pill_h)
+            .attr("rx", pill_h * 0.5)
+            .attr("fill", if l.lit { "#1c222d" } else { "#0c1016" })
             .attr("stroke", stroke)
-            .attr("stroke-width", if l.lit { 1.5 } else { 1.0 })
+            .attr("stroke-width", if l.lit { 1.4 } else { 1.0 })
+            .attr_opt("stroke-dasharray", (!l.lit).then_some("3 2"))
             .end();
-        let txt = fit_box(l.label, r.w, 11.0);
+        let dot_x = r.x + 8.0;
+        let dot_y = r.y + r.h * 0.5;
+        w.tag("circle")
+            .attr("cx", dot_x)
+            .attr("cy", dot_y)
+            .attr("r", if l.lit { 3.5 } else { 2.5 })
+            .attr("fill", if l.lit { fg } else { "none" })
+            .attr("stroke", fg)
+            .attr("stroke-width", 1.2)
+            .end();
+        let txt = fit_box(l.label, (r.w - 8.0).max(16.0), 10.0);
         w.tag("text")
-            .attr("x", r.x + r.w * 0.5)
-            .attr("y", r.y + r.h * 0.5 + 4.0)
+            .attr("x", r.x + 14.0 + (r.w - 16.0).max(0.0) * 0.5)
+            .attr("y", r.y + r.h * 0.5 + 3.5)
             .attr("text-anchor", "middle")
             .attr("fill", fg)
             .attr("font-family", "MuCRT, monospace")
-            .attr("font-size", 11.0)
+            .attr("font-size", 10.0)
             .text(&txt);
         w.close();
     }
@@ -423,18 +640,60 @@ impl Skin for WireframeSkin {
             .attr("data-bbox-w", rect.w)
             .attr("data-bbox-h", rect.h)
             .attr("role", if r.interactive { "button" } else { "status" })
-            .attr("aria-label", format!("{}: {}", r.label, r.value))
+            .attr(
+                "aria-label",
+                if r.label.is_empty() {
+                    r.value.to_owned()
+                } else {
+                    format!("{}: {}", r.label, r.value)
+                },
+            )
             .attr_opt("tabindex", r.interactive.then_some(0_u32))
             .open();
+
+        // Distinguish interactive buttons/toggles vs carousel page bar vs passive state displays.
+        if r.control_id == "c4-page-dots" {
+            w.tag("rect")
+                .attr("x", rect.x)
+                .attr("y", rect.y)
+                .attr("width", rect.w)
+                .attr("height", rect.h)
+                .attr("rx", 3.0)
+                .attr("fill", "#0c1017")
+                .attr("stroke", "#1f2733")
+                .attr("stroke-width", 1.0)
+                .end();
+            let txt = fit_box(&format!("{}: {}", r.label, r.value), rect.w, 11.5);
+            w.tag("text")
+                .attr("x", rect.x + rect.w * 0.5)
+                .attr("y", rect.y + rect.h * 0.5 + 4.0)
+                .attr("text-anchor", "middle")
+                .attr("fill", COLOR_INFO)
+                .attr("font-family", "MuCRT, monospace")
+                .attr("font-size", 11.5)
+                .text(&txt);
+            w.close();
+            return;
+        }
+
+        let is_button = r.interactive && !r.control_id.starts_with("c2-");
+        let fill = if is_button { "#182232" } else { BG_SCREEN };
+        let stroke = if is_button {
+            r.tone.wireframe_stroke()
+        } else if r.control_id.starts_with("c2-") {
+            "#263242"
+        } else {
+            r.tone.wireframe_stroke()
+        };
         w.tag("rect")
             .attr("x", rect.x)
             .attr("y", rect.y)
             .attr("width", rect.w)
             .attr("height", rect.h)
-            .attr("rx", 3.0)
-            .attr("fill", BG_SCREEN)
-            .attr("stroke", r.tone.wireframe_stroke())
-            .attr("stroke-width", 1.0)
+            .attr("rx", if is_button { 6.0 } else { 3.0 })
+            .attr("fill", fill)
+            .attr("stroke", stroke)
+            .attr("stroke-width", if is_button { 1.5 } else { 1.0 })
             .end();
         let combined = if r.label.is_empty() {
             r.value.to_owned()
@@ -443,11 +702,20 @@ impl Skin for WireframeSkin {
         };
         let txt = fit_box(&combined, rect.w, 12.0);
         w.tag("text")
-            .attr("x", rect.x + 6.0)
+            .attr(
+                "x",
+                if is_button {
+                    rect.x + rect.w * 0.5
+                } else {
+                    rect.x + 8.0
+                },
+            )
             .attr("y", rect.y + rect.h * 0.5 + 4.0)
+            .attr_opt("text-anchor", is_button.then_some("middle"))
             .attr("fill", r.tone.wireframe_fg())
             .attr("font-family", "MuCRT, monospace")
             .attr("font-size", 12.0)
+            .attr_opt("font-weight", is_button.then_some("bold"))
             .text(&txt);
         w.close();
     }
@@ -519,6 +787,39 @@ impl Skin for WireframeSkin {
         }
         w.close();
     }
+}
+
+fn draw_stepper_button(w: &mut SvgWriter, id: &str, aria_label: &str, glyph: &str, rect: Rect) {
+    w.tag("g")
+        .attr("data-control-id", id)
+        .attr("data-bbox-x", rect.x)
+        .attr("data-bbox-y", rect.y)
+        .attr("data-bbox-w", rect.w)
+        .attr("data-bbox-h", rect.h)
+        .attr("role", "button")
+        .attr("aria-label", aria_label)
+        .attr("tabindex", 0_u32)
+        .open();
+    w.tag("rect")
+        .attr("x", rect.x)
+        .attr("y", rect.y)
+        .attr("width", rect.w)
+        .attr("height", rect.h)
+        .attr("rx", 4.0)
+        .attr("fill", "#1a2536")
+        .attr("stroke", "#3d5270")
+        .attr("stroke-width", 1.2)
+        .end();
+    w.tag("text")
+        .attr("x", rect.x + rect.w * 0.5)
+        .attr("y", rect.y + rect.h * 0.5 + 4.0)
+        .attr("text-anchor", "middle")
+        .attr("fill", COLOR_INFO)
+        .attr("font-family", "MuCRT, monospace")
+        .attr("font-size", 11.5)
+        .attr("font-weight", "bold")
+        .text(glyph);
+    w.close();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -657,24 +958,14 @@ fn draw_integrated_trainway(
             .text(display_lbl);
     }
 
-    // 3. Integrated track bands: each track gets its label directly above its schematic line.
+    // 3. Integrated track bands: draw schematic track paths and signals first, then render
+    //    each track's label over a clean background backing strip so curves never cross text.
     let n_tracks = s.tracks.len().max(1);
     let band_h = ((track_bottom - track_top) / n_tracks as f64).max(22.0);
-    let mut trunk_y = track_top + 0.65 * band_h;
+    let trunk_y = (track_top + 0.68 * band_h).min(track_bottom - 4.0);
 
     for (idx, tr) in s.tracks.iter().enumerate() {
         let ty = (track_top + (idx as f64 + 0.68) * band_h).min(track_bottom - 4.0);
-        if idx == 0 {
-            trunk_y = ty;
-        }
-        let label_y = (ty - 10.0).max(st_hdr_y + 12.0);
-        if emitted_rows < max_rows {
-            if let Some(row) = s.lines.get(1 + idx) {
-                emit_screen_row(w, s, r, row, r.x + pad_x, label_y, font_px, row_h);
-                emitted_rows += 1;
-            }
-        }
-
         let fork_x =
             left + f64::from(tr.fork_stage.min(u32::try_from(n_st - 1).unwrap_or(0))) * span;
         let path = if idx == 0 || tr.lane == 0 {
@@ -710,6 +1001,27 @@ fn draw_integrated_trainway(
         for &(st_idx, glyph, tone) in tr.signals {
             let sx = left + f64::from(st_idx) * span;
             render_signal_shape(w, sx, ty, glyph, tone);
+        }
+    }
+
+    for (idx, _tr) in s.tracks.iter().enumerate() {
+        let ty = (track_top + (idx as f64 + 0.68) * band_h).min(track_bottom - 4.0);
+        let label_y = (ty - 12.0).max(st_hdr_y + 12.0);
+        if emitted_rows < max_rows {
+            if let Some(row) = s.lines.get(1 + idx) {
+                let est_w = ((row.text.chars().count() + 4) as f64 * font_px * 0.64)
+                    .min((r.w - 2.0 * pad_x).max(40.0));
+                w.tag("rect")
+                    .attr("x", r.x + pad_x - 2.0)
+                    .attr("y", (label_y - font_px).max(r.y + 2.0))
+                    .attr("width", est_w)
+                    .attr("height", font_px + 6.0)
+                    .attr("rx", 2.0)
+                    .attr("fill", BG_SCREEN)
+                    .end();
+                emit_screen_row(w, s, r, row, r.x + pad_x, label_y, font_px, row_h);
+                emitted_rows += 1;
+            }
         }
     }
 
