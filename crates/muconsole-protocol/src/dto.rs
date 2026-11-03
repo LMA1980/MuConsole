@@ -488,6 +488,19 @@ pub struct LeaseExpiredDto {
     pub deployment_id: String,
 }
 
+/// `GET /api/auth/session` and `POST /api/auth/redeem` response (`ActionRunner-controller`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct AuthSessionDto {
+    #[serde(default)]
+    pub authenticated: bool,
+    #[serde(default)]
+    pub github_login: Option<String>,
+    #[serde(default)]
+    pub invite_bound: bool,
+    #[serde(default)]
+    pub role: Option<String>,
+}
+
 /// REST paths (relative to the configured API base).
 pub mod paths {
     use alloc::format;
@@ -501,6 +514,10 @@ pub mod paths {
     pub const REPOS: &str = "/api/repos";
     /// Active CD deployment leases.
     pub const LEASES: &str = "/api/cd/leases";
+    /// Operator authentication session probe.
+    pub const AUTH_SESSION: &str = "/api/auth/session";
+    /// One-time invite token redemption endpoint.
+    pub const AUTH_REDEEM: &str = "/api/auth/redeem";
 
     /// `/api/repos/{owner}/{repo}/summary`.
     #[must_use]

@@ -17,7 +17,7 @@ use web_sys::{console, MessageEvent, Worker};
 
 use crate::client::{reload_banner_text, ClientUpdate, DataClient, WORKER_URL};
 use crate::components::{render_console, render_html_shell};
-use crate::state::ConsoleState;
+use crate::state::{extract_invite_token, ConsoleState, PENDING_INVITE_STORAGE_KEY};
 
 thread_local! {
     static WORKER: RefCell<Option<Worker>> = const { RefCell::new(None) };
@@ -78,16 +78,37 @@ pub fn start() {
         return;
     };
     let location = window.location();
-    let cfg = WorkerConfig::from_query(
-        &location.search().unwrap_or_default(),
-        &location.origin().unwrap_or_default(),
-    );
+    let raw_search = location.search().unwrap_or_default();
+    let hash = location.hash().unwrap_or_default();
+    let (invite_from_url, clean_search) = extract_invite_token(&raw_search);
+    if let Some(ref token) = invite_from_url {
+        if let Ok(Some(storage)) = window.session_storage() {
+            let _ = storage.set_item(PENDING_INVITE_STORAGE_KEY, token);
+        }
+        if let Ok(history) = window.history() {
+            let pathname = location.pathname().unwrap_or_else(|_| "/".into());
+            let clean_url = format!("{pathname}{clean_search}{hash}");
+            let _ = history.replace_state_with_url(&JsValue::NULL, "", Some(&clean_url));
+        }
+    }
+    let stored_invite = invite_from_url.or_else(|| {
+        window
+            .session_storage()
+            .ok()
+            .flatten()
+            .and_then(|s| s.get_item(PENDING_INVITE_STORAGE_KEY).ok().flatten())
+            .filter(|t| !t.is_empty())
+    });
+
+    let cfg = WorkerConfig::from_query(&clean_search, &location.origin().unwrap_or_default());
     let state = Rc::new(RefCell::new(ConsoleState::new()));
     {
-        let hash = location.hash().unwrap_or_default();
-        let search = location.search().unwrap_or_default();
-        state.borrow_mut().init_from_env(&hash, &search, None);
-        repaint(&state.borrow());
+        let mut st = state.borrow_mut();
+        st.init_from_env(&hash, &raw_search, None);
+        if st.pending_invite.is_none() {
+            st.pending_invite.clone_from(&stored_invite);
+        }
+        repaint(&st);
     }
     let worker = match Worker::new(WORKER_URL) {
         Ok(w) => w,
@@ -109,6 +130,12 @@ pub fn start() {
                 show_banner(&reload_banner_text(expected, found));
             }
             ClientUpdate::View => {
+                if st.is_operator() && st.pending_invite.take().is_some() {
+                    if let Some(Ok(Some(storage))) = web_sys::window().map(|w| w.session_storage())
+                    {
+                        let _ = storage.remove_item(PENDING_INVITE_STORAGE_KEY);
+                    }
+                }
                 repaint(&st);
                 console::log_1(&JsValue::from_str(&st.client.summary()));
             }
@@ -135,6 +162,9 @@ pub fn start() {
     }
 
     send(&worker, &UiCommand::Configure(cfg));
+    if let Some(token) = stored_invite {
+        send(&worker, &UiCommand::RedeemInvite { token });
+    }
 
     if let Some(doc) = window.document() {
         let w = worker.clone();

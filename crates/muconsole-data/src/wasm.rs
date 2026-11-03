@@ -128,6 +128,18 @@ fn request(url: &str, accept: &str, signal: Option<&AbortController>) -> Result<
     Ok(req)
 }
 
+fn post_json_request(url: &str, body_json: &str) -> Result<Request, JsValue> {
+    let init = RequestInit::new();
+    init.set_method("POST");
+    init.set_credentials(RequestCredentials::SameOrigin);
+    init.set_cache(RequestCache::NoStore);
+    init.set_body(&JsValue::from_str(body_json));
+    let req = Request::new_with_str_and_init(url, &init)?;
+    req.headers().set("Accept", "application/json")?;
+    req.headers().set("Content-Type", "application/json")?;
+    Ok(req)
+}
+
 async fn fetch_response(req: &Request) -> Result<Response, JsValue> {
     Ok(JsFuture::from(scope().fetch_with_request(req))
         .await?
@@ -136,7 +148,14 @@ async fn fetch_response(req: &Request) -> Result<Response, JsValue> {
 
 async fn fetch_json(kind: FetchKind, url: String) {
     let result = async {
-        let req = request(&url, "application/json", None).map_err(|e| HttpError {
+        let req = match &kind {
+            FetchKind::AuthRedeem(token) => {
+                let payload = serde_json::json!({ "token": token }).to_string();
+                post_json_request(&url, &payload)
+            }
+            _ => request(&url, "application/json", None),
+        }
+        .map_err(|e| HttpError {
             status: 0,
             message: js_msg(&e),
         })?;

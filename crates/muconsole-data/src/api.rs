@@ -2,9 +2,9 @@
 //! REST and SSE payload decoding into store [`Input`]s.
 
 use muconsole_protocol::dto::{
-    BranchCreatedDto, BranchDeletedDto, DeploymentDto, GateDto, ItProgressDto, JobStageChangedDto,
-    LeaseExpiredDto, NodeMembershipChangedDto, PrStateChangedDto, PromotedDto, RepoDto,
-    RepoListResponseDto, RepoSummaryDto, RolledBackDto, TaintedDto, TopologyDto,
+    AuthSessionDto, BranchCreatedDto, BranchDeletedDto, DeploymentDto, GateDto, ItProgressDto,
+    JobStageChangedDto, LeaseExpiredDto, NodeMembershipChangedDto, PrStateChangedDto, PromotedDto,
+    RepoDto, RepoListResponseDto, RepoSummaryDto, RolledBackDto, TaintedDto, TopologyDto,
 };
 use muconsole_protocol::RepoId;
 use serde::de::DeserializeOwned;
@@ -20,7 +20,12 @@ pub enum FetchKind {
     Topology(RepoId),
     Deployments(RepoId),
     Gate(String),
+    AuthSession,
+    AuthRedeem(String),
 }
+
+/// Alias for [`FetchKind`] used by protocol consumers.
+pub type Endpoint = FetchKind;
 
 /// Which SSE stream an event came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -46,6 +51,14 @@ impl StreamId {
 
 fn json<T: DeserializeOwned>(body: &str) -> Result<T, String> {
     serde_json::from_str(body).map_err(|e| e.to_string())
+}
+
+/// Decode a `/api/auth/session` or `/api/auth/redeem` JSON body.
+///
+/// # Errors
+/// Returns the JSON error message when the payload is malformed.
+pub fn parse_auth_session(bytes: &[u8]) -> Result<AuthSessionDto, String> {
+    serde_json::from_slice(bytes).map_err(|e| e.to_string())
 }
 
 #[derive(Deserialize)]
@@ -75,6 +88,9 @@ pub fn parse_fetch(kind: &FetchKind, body: &str) -> Result<Input, String> {
             list: json::<Vec<DeploymentDto>>(body)?,
         },
         FetchKind::Gate(_) => Input::Gate(json::<GateDto>(body)?),
+        FetchKind::AuthSession | FetchKind::AuthRedeem(_) => {
+            Input::AuthSession(parse_auth_session(body.as_bytes())?)
+        }
     })
 }
 

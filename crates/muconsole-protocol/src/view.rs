@@ -22,10 +22,12 @@
 //! DTOs in [`crate::dto`]; postcard ignores names, so they cost nothing on
 //! the worker wire.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
+use crate::dto::AuthSessionDto;
 use crate::model::{RepoId, SubmoduleId};
 
 /// Overall CI state of a repository.
@@ -430,6 +432,61 @@ pub struct AreaBadges {
     pub fleet: u32,
 }
 
+/// Operator authentication state surfaced in the top bar and used to gate
+/// raw execution logs and job restart controls.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthState {
+    #[default]
+    Anonymous,
+    InviteRequired {
+        github_login: String,
+    },
+    Operator {
+        github_login: String,
+        role: Option<String>,
+    },
+}
+
+impl AuthState {
+    /// Derive [`AuthState`] from an [`AuthSessionDto`] response.
+    #[must_use]
+    pub fn from_session(dto: &AuthSessionDto) -> Self {
+        if dto.authenticated || dto.invite_bound {
+            Self::Operator {
+                github_login: dto
+                    .github_login
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "operator".into()),
+                role: dto.role.clone(),
+            }
+        } else if let Some(login) = dto.github_login.as_ref().filter(|s| !s.is_empty()) {
+            Self::InviteRequired {
+                github_login: login.clone(),
+            }
+        } else {
+            Self::Anonymous
+        }
+    }
+
+    /// Whether the session is an authenticated, invite-bound operator.
+    #[must_use]
+    pub fn is_operator(&self) -> bool {
+        matches!(self, Self::Operator { .. })
+    }
+
+    /// Short top-bar badge label (`READ-ONLY`, `INVITE REQ (@login)`, `@login`).
+    #[must_use]
+    pub fn badge_label(&self) -> String {
+        match self {
+            Self::Anonymous => "READ-ONLY".into(),
+            Self::InviteRequired { github_login } => format!("INVITE REQ (@{github_login})"),
+            Self::Operator { github_login, .. } => format!("@{github_login}"),
+        }
+    }
+}
+
 /// Full view model snapshot.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct ViewModel {
@@ -447,6 +504,9 @@ pub struct ViewModel {
     pub nodes: Vec<FabricNode>,
     /// Set when the data is stale (offline snapshot): when it was saved.
     pub stale_since_epoch_ms: Option<u64>,
+    /// Operator authentication state.
+    #[serde(default)]
+    pub auth: AuthState,
 }
 
 /// Incremental change to the view model.
@@ -477,6 +537,7 @@ pub enum Delta {
     NodeUpsert(FabricNode),
     NodeRemoved(String),
     Stale(Option<u64>),
+    Auth(AuthState),
 }
 
 fn upsert_sorted<T, K: Ord + ?Sized>(v: &mut Vec<T>, item: T, key: impl Fn(&T) -> &K) {
@@ -506,6 +567,7 @@ pub fn apply(vm: &mut ViewModel, delta: &Delta) {
         Delta::NodeUpsert(n) => upsert_sorted(&mut vm.nodes, n.clone(), |x| x.id.as_str()),
         Delta::NodeRemoved(id) => remove_sorted(&mut vm.nodes, id.as_str(), |x| x.id.as_str()),
         Delta::Stale(s) => vm.stale_since_epoch_ms = *s,
+        Delta::Auth(a) => vm.auth = a.clone(),
         Delta::FabricRev(_)
         | Delta::SubmoduleBumpPending(_)
         | Delta::BranchUpsert(_)
@@ -646,6 +708,9 @@ pub fn diff(old: &ViewModel, new: &ViewModel) -> Vec<Delta> {
     );
     if old.stale_since_epoch_ms != new.stale_since_epoch_ms {
         out.push(Delta::Stale(new.stale_since_epoch_ms));
+    }
+    if old.auth != new.auth {
+        out.push(Delta::Auth(new.auth.clone()));
     }
     out
 }
