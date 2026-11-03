@@ -5,9 +5,10 @@
 //! resync, and offline cache watermark persistence.
 
 use muconsole_protocol::{
-    apply_all, encode, Area, ConnState, CrtFont, DataEvent, DataSource, FadeReason, GateOutcome,
-    PanelId, PrState, RepoId, Route, Selection, SidingPhase, SubmoduleId, UiCommand, UiError,
-    ViewModel, WorkerConfig, PROTOCOL_VERSION,
+    apply_all, encode, Area, CiSubView, ConnState, CrtFont, DataEvent, DataSource, FadeReason,
+    GateOutcome, ObserveSubView, PanelId, PrState, RegistrySubView, RepoId, Route, Selection,
+    SidingPhase, SubView, SubmoduleId, UiCommand, UiError, ViewModel, WorkerConfig,
+    PROTOCOL_VERSION,
 };
 
 use crate::api::tests::{GATE, REPOS, TOPOLOGY};
@@ -465,16 +466,42 @@ fn engine_handles_unknown_scenarios_routes_and_wire_errors() {
     let fx = eng.handle(
         UiCommand::Subscribe(Route {
             area: Area::Ci,
+            subview: SubView::Ci(CiSubView::Trainway),
             repo: Some(RepoId::new(OWNER, SUPERPROJECT)),
             submodule: Some(SubmoduleId {
                 path: "code/engine".into(),
             }),
             branch: None,
             job: None,
+            trace_id: None,
+            filter: None,
         }),
         10,
     );
     assert!(!fx.is_empty());
+    let reg_fx = eng.handle(
+        UiCommand::SelectSubView(SubView::Registry(RegistrySubView::Packages)),
+        15,
+    );
+    assert!(reg_fx.iter().any(|e| matches!(
+        e,
+        Effect::Fetch {
+            kind: FetchKind::RegPackages,
+            ..
+        }
+    )));
+    let obs_fx = eng.handle(
+        UiCommand::SelectSubView(SubView::Observe(ObserveSubView::PurePath)),
+        16,
+    );
+    assert!(obs_fx.iter().any(|e| matches!(
+        e,
+        Effect::Fetch {
+            kind: FetchKind::ObsTraces,
+            ..
+        }
+    )));
+    assert!(!eng.handle(UiCommand::ResetStream, 18).is_empty());
     assert!(eng
         .handle(
             UiCommand::Page {

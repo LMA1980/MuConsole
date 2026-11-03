@@ -3,22 +3,19 @@
 //!
 //! This module is the client side of the contract documented in
 //! `docs/api-contract.md`. ActionRunner-controller serves `/api/repos*` and
-//! the new CI event kinds on `/api/events`; MuConDe-controller serves
-//! `/api/cd/*`. All field names are `snake_case`, enums are `snake_case`
+//! the CI event kinds on `/api/events`; MuConDe-controller serves
+//! `/api/cd/*`; MuRegist serves `/api/reg/v1/*`; MuObserve serves
+//! `/api/obs/v1/*`. All field names are `snake_case`, enums are `snake_case`
 //! strings, timestamps are Unix epoch milliseconds and unknown fields are
 //! ignored, so servers may add fields without breaking the console.
-//!
-//! Optional fields default when absent or `null` (`#[serde(default,
-//! deserialize_with = "null_default")]`), and string job identifiers from
-//! `ActionRunner-controller` (`"job-1793563200-44444444"`) map
-//! deterministically to monotonic `u64` ids alongside numeric fixture ids.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 use serde::{Deserialize, Deserializer, Serialize};
 
 pub use crate::view::{
-    GateOutcome, PrState, RepoStatus, RollbackReason, Slot, StageState, TestState, Visibility,
+    CanaryBundleState, GateOutcome, LogSeverity, PackageEcosystem, PrState, ProblemCategory,
+    RepoStatus, RollbackReason, Slot, SmartscapeLayer, StageState, TestState, Visibility,
 };
 
 fn null_default<'de, D, T>(d: D) -> Result<T, D::Error>
@@ -340,10 +337,6 @@ struct RawNodeMembership {
 }
 
 /// SSE `event: node_membership_changed` on `/api/events`.
-///
-/// Accepts both `{"node_id", "online": bool, "fabric_rev"}` and
-/// `ActionRunner-controller`'s `{"node_id", "change": "joined"|"left"|"online"|"offline",
-/// "online_nodes": [...], "fabric_rev"}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "RawNodeMembership")]
 pub struct NodeMembershipChangedDto {
@@ -443,8 +436,7 @@ pub struct LeaseDto {
     pub promoted: bool,
 }
 
-/// SSE `event: it_progress` on `/api/cd/events` (mirrors the
-/// `IntegrationTestProgress` IPC message).
+/// SSE `event: it_progress` on `/api/cd/events`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItProgressDto {
     pub deployment_id: String,
@@ -488,6 +480,238 @@ pub struct LeaseExpiredDto {
     pub deployment_id: String,
 }
 
+// ---------------------------------------------------------------- Registry DTOs (MuRegist)
+
+/// `GET /api/reg/v1/packages` (`MuRegist` package entry).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PackageDto {
+    #[serde(default, deserialize_with = "null_default")]
+    pub ecosystem: PackageEcosystem,
+    pub name: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub latest_version: String,
+    #[serde(default)]
+    pub versions_count: u32,
+    #[serde(default, deserialize_with = "null_default")]
+    pub sha256_prefix: String,
+    #[serde(default)]
+    pub deps_count: u32,
+    #[serde(default)]
+    pub yanked: bool,
+    #[serde(default)]
+    pub tainted: bool,
+    #[serde(default)]
+    pub taint_reason: Option<String>,
+    #[serde(default, deserialize_with = "null_default")]
+    pub versions: Vec<String>,
+}
+
+/// `GET /api/reg/v1/canaries` (`MuRegist` canary bundle & taint entry).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanaryBundleDto {
+    pub bundle_id: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub owner: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub repo: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub service: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub artifact_digest: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub state: CanaryBundleState,
+    #[serde(default)]
+    pub taint_reason: Option<String>,
+    #[serde(default, deserialize_with = "null_default")]
+    pub deployment_id: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub trace_id: String,
+}
+
+/// `GET /api/reg/v1/cas/status` (`MuRegist` CAS storage health).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CasStatusDto {
+    #[serde(default)]
+    pub blob_count: u64,
+    #[serde(default)]
+    pub dedup_bytes: u64,
+    #[serde(default)]
+    pub raw_bytes: u64,
+    #[serde(default)]
+    pub dedup_ratio_bp: u32,
+    #[serde(default)]
+    pub gc_watermark_pct: u32,
+    #[serde(default)]
+    pub last_scrub_epoch_ms: u64,
+    #[serde(default)]
+    pub corrupt_blobs: u32,
+}
+
+// ---------------------------------------------------------------- Observe DTOs (MuObserve)
+
+/// Node entry of [`SmartscapeDto`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmartscapeNodeDto {
+    pub id: String,
+    pub label: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub layer: SmartscapeLayer,
+    #[serde(default)]
+    pub req_per_sec_bp: u32,
+    #[serde(default)]
+    pub error_rate_bp: u32,
+    #[serde(default)]
+    pub p95_ms: u32,
+    #[serde(default = "default_true")]
+    pub healthy: bool,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+/// Edge entry of [`SmartscapeDto`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmartscapeEdgeDto {
+    pub from_id: String,
+    pub to_id: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub protocol: String,
+    #[serde(default)]
+    pub call_rate_rps: u32,
+    #[serde(default)]
+    pub error_rate_bp: u32,
+    #[serde(default)]
+    pub p95_ms: u32,
+}
+
+/// `GET /api/obs/v1/smartscape`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SmartscapeDto {
+    #[serde(default, deserialize_with = "null_default")]
+    pub nodes: Vec<SmartscapeNodeDto>,
+    #[serde(default, deserialize_with = "null_default")]
+    pub edges: Vec<SmartscapeEdgeDto>,
+}
+
+/// Span entry of [`TraceDto`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceSpanDto {
+    pub span_id: String,
+    #[serde(default)]
+    pub parent_span_id: Option<String>,
+    pub service: String,
+    pub operation: String,
+    #[serde(default)]
+    pub start_offset_us: u64,
+    #[serde(default)]
+    pub duration_us: u64,
+    #[serde(default)]
+    pub self_time_us: u64,
+    #[serde(default)]
+    pub critical_path: bool,
+    #[serde(default)]
+    pub error: bool,
+    #[serde(default, deserialize_with = "null_default")]
+    pub hardware_class: String,
+}
+
+/// `GET /api/obs/v1/traces` and `GET /api/obs/v1/traces/{trace_id}`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceDto {
+    pub trace_id: String,
+    pub root_service: String,
+    pub root_operation: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub domain: String,
+    #[serde(default)]
+    pub duration_ms: u32,
+    #[serde(default)]
+    pub error: bool,
+    #[serde(default)]
+    pub slow_p99: bool,
+    #[serde(default)]
+    pub started_epoch_ms: u64,
+    #[serde(default, deserialize_with = "null_default")]
+    pub spans: Vec<TraceSpanDto>,
+}
+
+/// `GET /api/obs/v1/problems`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProblemDto {
+    pub problem_id: String,
+    pub title: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub category: ProblemCategory,
+    #[serde(default, deserialize_with = "null_default")]
+    pub severity: String,
+    #[serde(default)]
+    pub burn_rate_bp: u32,
+    #[serde(default, deserialize_with = "null_default")]
+    pub impacted_entity: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub root_cause_trace_id: String,
+    #[serde(default = "default_true")]
+    pub active: bool,
+}
+
+/// `GET /api/obs/v1/logs`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OtelLogDto {
+    #[serde(default)]
+    pub timestamp_ms: u64,
+    #[serde(default, deserialize_with = "null_default")]
+    pub severity: LogSeverity,
+    pub service: String,
+    #[serde(default)]
+    pub span_id: Option<String>,
+    pub trace_id: String,
+    pub message: String,
+}
+
+/// `GET /api/obs/v1/metrics/timeseries`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MetricSeriesDto {
+    pub service: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub hardware_class: String,
+    #[serde(default)]
+    pub rps: u32,
+    #[serde(default)]
+    pub error_rate_bp: u32,
+    #[serde(default)]
+    pub p50_ms: u32,
+    #[serde(default)]
+    pub p95_ms: u32,
+    #[serde(default)]
+    pub p99_ms: u32,
+    #[serde(default, deserialize_with = "null_default")]
+    pub exemplar_trace_id: String,
+    #[serde(default, deserialize_with = "null_default")]
+    pub samples: Vec<u32>,
+}
+
+/// `GET /api/obs/v1/store/status`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct StoreStatusDto {
+    #[serde(default)]
+    pub hot_duckdb_rows: u64,
+    #[serde(default)]
+    pub hot_duckdb_bytes: u64,
+    #[serde(default)]
+    pub cold_parquet_partitions: u32,
+    #[serde(default)]
+    pub cold_parquet_rows: u64,
+    #[serde(default)]
+    pub cold_parquet_bytes: u64,
+    #[serde(default)]
+    pub zstd_compression_bp: u32,
+    #[serde(default)]
+    pub retention_days: u32,
+    #[serde(default, deserialize_with = "null_default")]
+    pub oldest_watermark_iso: String,
+}
+
 /// REST paths (relative to the configured API base).
 pub mod paths {
     use alloc::format;
@@ -501,6 +725,26 @@ pub mod paths {
     pub const REPOS: &str = "/api/repos";
     /// Active CD deployment leases.
     pub const LEASES: &str = "/api/cd/leases";
+
+    /// Registry package catalog (`MuRegist`).
+    pub const REG_PACKAGES: &str = "/api/reg/v1/packages";
+    /// Registry canary bundles & taint provenance (`MuRegist`).
+    pub const REG_CANARIES: &str = "/api/reg/v1/canaries";
+    /// Registry CAS storage health (`MuRegist`).
+    pub const REG_CAS_STATUS: &str = "/api/reg/v1/cas/status";
+
+    /// Observe Smartscape 3-tier topology (`MuObserve`).
+    pub const OBS_SMARTSCAPE: &str = "/api/obs/v1/smartscape";
+    /// Observe causal SLO problems (`MuObserve`).
+    pub const OBS_PROBLEMS: &str = "/api/obs/v1/problems";
+    /// Observe recent PurePath traces (`MuObserve`).
+    pub const OBS_TRACES: &str = "/api/obs/v1/traces";
+    /// Observe sanitized OTel log stream (`MuObserve`).
+    pub const OBS_LOGS: &str = "/api/obs/v1/logs";
+    /// Observe golden-signal & hardware metric series (`MuObserve`).
+    pub const OBS_METRICS: &str = "/api/obs/v1/metrics/timeseries";
+    /// Observe DuckDB + Parquet storage health (`MuObserve`).
+    pub const OBS_STORE_STATUS: &str = "/api/obs/v1/store/status";
 
     /// `/api/repos/{owner}/{repo}/summary`.
     #[must_use]
@@ -524,5 +768,11 @@ pub mod paths {
     #[must_use]
     pub fn gate(deployment_id: &str) -> String {
         format!("/api/cd/deployments/{deployment_id}/gate")
+    }
+
+    /// `/api/obs/v1/traces/{trace_id}`.
+    #[must_use]
+    pub fn obs_trace(trace_id: &str) -> String {
+        format!("/api/obs/v1/traces/{trace_id}")
     }
 }

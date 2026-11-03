@@ -2,11 +2,13 @@
 //! REST and SSE payload decoding into store [`Input`]s.
 
 use muconsole_protocol::dto::{
-    BranchCreatedDto, BranchDeletedDto, DeploymentDto, GateDto, ItProgressDto, JobStageChangedDto,
-    LeaseExpiredDto, NodeMembershipChangedDto, PrStateChangedDto, PromotedDto, RepoDto,
-    RepoListResponseDto, RepoSummaryDto, RolledBackDto, TaintedDto, TopologyDto,
+    BranchCreatedDto, BranchDeletedDto, CanaryBundleDto, CasStatusDto, DeploymentDto, GateDto,
+    ItProgressDto, JobStageChangedDto, LeaseDto, LeaseExpiredDto, MetricSeriesDto,
+    NodeMembershipChangedDto, OtelLogDto, PackageDto, PrStateChangedDto, ProblemDto, PromotedDto,
+    RepoDto, RepoListResponseDto, RepoSummaryDto, RolledBackDto, SmartscapeDto, StoreStatusDto,
+    TaintedDto, TopologyDto, TraceDto,
 };
-use muconsole_protocol::RepoId;
+use muconsole_protocol::{CdLease, RepoId};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
@@ -20,6 +22,17 @@ pub enum FetchKind {
     Topology(RepoId),
     Deployments(RepoId),
     Gate(String),
+    Leases,
+    RegPackages,
+    RegCanaries,
+    RegCasStatus,
+    ObsSmartscape,
+    ObsProblems,
+    ObsTraces,
+    ObsTraceDetail(String),
+    ObsLogs,
+    ObsMetrics,
+    ObsStoreStatus,
 }
 
 /// Which SSE stream an event came from.
@@ -75,6 +88,33 @@ pub fn parse_fetch(kind: &FetchKind, body: &str) -> Result<Input, String> {
             list: json::<Vec<DeploymentDto>>(body)?,
         },
         FetchKind::Gate(_) => Input::Gate(json::<GateDto>(body)?),
+        FetchKind::Leases => {
+            let leases = json::<Vec<LeaseDto>>(body)?
+                .into_iter()
+                .map(|l| CdLease {
+                    lease_id: l.lease_id,
+                    deployment_id: l.deployment_id,
+                    target_node: l.target_node,
+                    service: l.service,
+                    artifact_digest: l.artifact_digest,
+                    active_slot: l.active_slot,
+                    candidate_slot: l.candidate_slot,
+                    ttl_remaining_ms: l.ttl_remaining_ms,
+                    promoted: l.promoted,
+                })
+                .collect();
+            Input::Leases(leases)
+        }
+        FetchKind::RegPackages => Input::RegPackages(json::<Vec<PackageDto>>(body)?),
+        FetchKind::RegCanaries => Input::RegCanaries(json::<Vec<CanaryBundleDto>>(body)?),
+        FetchKind::RegCasStatus => Input::RegCasStatus(json::<CasStatusDto>(body)?),
+        FetchKind::ObsSmartscape => Input::ObsSmartscape(json::<SmartscapeDto>(body)?),
+        FetchKind::ObsProblems => Input::ObsProblems(json::<Vec<ProblemDto>>(body)?),
+        FetchKind::ObsTraces => Input::ObsTraces(json::<Vec<TraceDto>>(body)?),
+        FetchKind::ObsTraceDetail(_) => Input::ObsTraceDetail(json::<TraceDto>(body)?),
+        FetchKind::ObsLogs => Input::ObsLogs(json::<Vec<OtelLogDto>>(body)?),
+        FetchKind::ObsMetrics => Input::ObsMetrics(json::<Vec<MetricSeriesDto>>(body)?),
+        FetchKind::ObsStoreStatus => Input::ObsStoreStatus(json::<StoreStatusDto>(body)?),
     })
 }
 

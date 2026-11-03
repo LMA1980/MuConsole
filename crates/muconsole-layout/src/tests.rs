@@ -5,7 +5,7 @@ use super::*;
 use muconsole_theme::metrics::{CRT_FONTS, HURMIT, OPEN_DYSLEXIC};
 
 const EPS: f64 = 0.01;
-const AREAS: [Area; 4] = [Area::Overview, Area::Ci, Area::Cd, Area::Fleet];
+const AREAS: [Area; 5] = Area::ALL;
 
 /// Design targets: (width, height, expected breakpoint).
 const TARGETS: [(f64, f64, Breakpoint); 6] = [
@@ -66,8 +66,6 @@ fn assert_no_overflow(f: &Frames, label: &str) {
             assert!(!overlap(a, b), "{label}: {a:?} overlaps {b:?}");
         }
     }
-    // Frames span the full canvas height (minus margins): nothing to scroll,
-    // nothing left empty.
     let top = regions.iter().map(|r| r.y).fold(f64::INFINITY, f64::min);
     let bottom = regions.iter().map(Rect::bottom).fold(0.0, f64::max);
     assert!((top - (c.y + MARGIN)).abs() < 0.5, "{label}: top {top}");
@@ -85,55 +83,24 @@ fn assert_no_overflow(f: &Frames, label: &str) {
         Breakpoint::Wide | Breakpoint::Medium => CRT_FLOOR_DESKTOP_PX,
         Breakpoint::CompactLandscape | Breakpoint::Phone => CRT_FLOOR_PHONE_PX,
     };
+    assert_eq!(f.pages, 1, "{label}: single active sub-view page");
+    assert_eq!(f.panels.len(), 1, "{label}: single full-canvas panel");
+    assert!(
+        (f.subview_bar.h - SUBVIEW_BAR_H).abs() < EPS,
+        "{label}: subview_bar height"
+    );
     for p in &f.panels {
         assert!(p.page < f.pages, "{label}: page out of range");
+        assert_eq!(
+            p.plate, f.active_canvas,
+            "{label}: panel plate matches active_canvas"
+        );
         assert!(
             inside(&p.crt, &p.plate),
             "{label}: {:?} CRT outside plate",
             p.kind
         );
         assert_grid(&p.grid, &p.crt, floor, &format!("{label} {:?}", p.kind));
-    }
-    for page in 0..f.pages {
-        assert!(f.page(page).count() >= 1, "{label}: empty page {page}");
-    }
-    if let Some(car) = &f.carousel {
-        assert!(!car.cards.is_empty(), "{label}: carousel without cards");
-        for (i, card) in car.cards.iter().enumerate() {
-            assert!(
-                inside(&card.ci_crt, &card.plate),
-                "{label}: card {i} CI CRT"
-            );
-            assert!(
-                inside(&card.cd_crt, &card.plate),
-                "{label}: card {i} CD CRT"
-            );
-            assert!(
-                !overlap(&card.ci_crt, &card.cd_crt),
-                "{label}: card {i} CRTs overlap"
-            );
-            assert_grid(
-                &card.ci_grid,
-                &card.ci_crt,
-                floor,
-                &format!("{label} card {i} CI"),
-            );
-            assert_grid(
-                &card.cd_grid,
-                &card.cd_crt,
-                floor,
-                &format!("{label} card {i} CD"),
-            );
-            for other in &car.cards[i + 1..] {
-                assert!(
-                    !overlap(&card.plate, &other.plate),
-                    "{label}: cards overlap"
-                );
-            }
-            if let Some(sw) = car.switch {
-                assert!(!overlap(&card.plate, &sw), "{label}: card overlaps switch");
-            }
-        }
     }
 }
 
@@ -152,7 +119,7 @@ fn target_viewports_never_overflow() {
 }
 
 #[test]
-fn wide_matches_concept_geometry() {
+fn wide_matches_single_subview_geometry() {
     let f = solve(
         Viewport::new(1512.0, 860.0),
         SafeArea::ZERO,
@@ -161,17 +128,34 @@ fn wide_matches_concept_geometry() {
     );
     assert_eq!(f.nav, Rect::new(6.0, 6.0, 80.0, 848.0));
     assert_eq!(f.top_bar, Rect::new(94.0, 6.0, 1412.0, 48.0));
-    let car = f.carousel.as_ref().expect("carousel");
-    assert_eq!(car.cards.len(), 3);
-    assert_eq!(car.cards[0].plate, Rect::new(94.0, 64.0, 324.0, 192.0));
-    assert_eq!(car.cards[2].plate.x, 766.0);
-    assert_eq!(car.cards[0].ci_crt, Rect::new(110.0, 106.0, 140.0, 132.0));
-    assert_eq!(car.switch, Some(Rect::new(1102.0, 64.0, 92.0, 192.0)));
-    assert_eq!(f.rotary, Some(Rect::new(1204.0, 64.0, 302.0, 192.0)));
+    assert_eq!(f.subview_bar, Rect::new(94.0, 60.0, 1412.0, 36.0));
+    assert_eq!(f.active_canvas, Rect::new(94.0, 102.0, 1412.0, 752.0));
+    assert!(f.carousel.is_none());
+    assert!(f.rotary.is_none());
+    assert_eq!(f.panels.len(), 1);
     assert_eq!(f.panels[0].kind, PanelKind::Trainway);
-    assert_eq!(f.panels[0].plate, Rect::new(94.0, 282.0, 898.0, 572.0));
-    assert_eq!(f.panels[1].plate, Rect::new(1000.0, 282.0, 506.0, 572.0));
-    assert_eq!(f.panels[0].crt, Rect::new(116.0, 346.0, 854.0, 484.0));
+    assert_eq!(f.panels[0].plate, f.active_canvas);
+}
+
+#[test]
+fn scorecard_grid_populates_non_overlapping_cards() {
+    let f = solve(
+        Viewport::new(1512.0, 860.0),
+        SafeArea::ZERO,
+        Area::Ci,
+        &HURMIT,
+    );
+    let cards = scorecard_cards(f.panels[0].crt, f.breakpoint, 6, &HURMIT);
+    assert_eq!(cards.len(), 6);
+    for (i, a) in cards.iter().enumerate() {
+        assert!(inside(&a.plate, &f.panels[0].crt));
+        assert!(inside(&a.ci_crt, &a.plate));
+        assert!(inside(&a.cd_crt, &a.plate));
+        assert!(!overlap(&a.ci_crt, &a.cd_crt));
+        for b in &cards[i + 1..] {
+            assert!(!overlap(&a.plate, &b.plate));
+        }
+    }
 }
 
 #[test]
@@ -210,42 +194,9 @@ fn desktop_panels_keep_design_size() {
     );
     for p in &f.panels {
         assert!(!p.grid.clamped, "{:?} clamped at desktop size", p.kind);
-        assert!(p.grid.cols >= 40, "{:?} only {} cols", p.kind, p.grid.cols);
+        assert!(p.grid.cols >= 80, "{:?} only {} cols", p.kind, p.grid.cols);
+        assert!(p.grid.rows >= 24, "{:?} only {} rows", p.kind, p.grid.rows);
     }
-    let trainway = &f.panels[0].grid;
-    // 8 stations at ≥ 7 columns each fit on one row.
-    assert!(trainway.cols >= 8 * 7);
-    assert!(trainway.rows >= 18);
-}
-
-#[test]
-fn shorter_canvas_shrinks_cards_first() {
-    let tall = solve(
-        Viewport::new(1512.0, 982.0),
-        SafeArea::ZERO,
-        Area::Ci,
-        &HURMIT,
-    );
-    let car = tall.carousel.as_ref().expect("carousel");
-    assert!(
-        (car.cards[0].plate.h - CARD_H).abs() < EPS,
-        "cards stay at ideal height"
-    );
-    assert!(tall.panels[0].plate.h > 572.0, "dashboard grows");
-
-    let medium = solve(
-        Viewport::new(1280.0, 560.0),
-        SafeArea::ZERO,
-        Area::Ci,
-        &HURMIT,
-    );
-    assert_eq!(medium.breakpoint, Breakpoint::Medium);
-    let card_h = medium.carousel.as_ref().expect("carousel").cards[0].plate.h;
-    assert!(
-        (CARD_H_MIN - EPS..CARD_H).contains(&card_h),
-        "card {card_h}"
-    );
-    assert_no_overflow(&medium, "1280x560");
 }
 
 #[test]
@@ -256,14 +207,12 @@ fn phone_layout_and_safe_areas() {
         Area::Ci,
         &HURMIT,
     );
-    assert_eq!(f.pages, 2);
+    assert_eq!(f.pages, 1);
     assert!(f.rotary.is_none());
-    assert_eq!(f.carousel.as_ref().map(|c| c.cards.len()), Some(1));
+    assert!(f.carousel.is_none());
     assert!((f.nav.h - PHONE_NAV_H).abs() < EPS);
-    assert!(f.page(0).all(|p| p.kind == PanelKind::Trainway));
-    assert!(f.page(1).all(|p| p.kind == PanelKind::Delivery));
+    assert!((f.subview_bar.h - SUBVIEW_BAR_H).abs() < EPS);
 
-    // Full 402×874 with Dynamic Island / home indicator insets ≈ the PWA canvas.
     let safe = SafeArea {
         top: 62.0,
         bottom: 34.0,
@@ -273,7 +222,6 @@ fn phone_layout_and_safe_areas() {
     assert_eq!(pwa.canvas, Rect::new(0.0, 62.0, 402.0, 778.0));
     assert_no_overflow(&pwa, "402x874 safe");
 
-    // Landscape with side insets.
     let side = SafeArea {
         left: 62.0,
         right: 62.0,
@@ -286,12 +234,14 @@ fn phone_layout_and_safe_areas() {
 }
 
 #[test]
-fn fleet_uses_a_single_panel() {
-    for (w, h, _) in TARGETS {
-        let f = solve(Viewport::new(w, h), SafeArea::ZERO, Area::Fleet, &HURMIT);
-        assert_eq!(f.pages, 1);
-        assert_eq!(f.panels.len(), 1);
-        assert_eq!(f.panels[0].kind, PanelKind::Fleet);
+fn every_area_uses_a_single_full_canvas_panel() {
+    for area in AREAS {
+        for (w, h, _) in TARGETS {
+            let f = solve(Viewport::new(w, h), SafeArea::ZERO, area, &HURMIT);
+            assert_eq!(f.pages, 1);
+            assert_eq!(f.panels.len(), 1);
+            assert_eq!(f.panels[0].kind, PanelKind::for_area(area));
+        }
     }
 }
 
@@ -308,7 +258,6 @@ fn classification_boundaries() {
 
 #[test]
 fn sweep_never_overflows() {
-    // Every size between a small phone and a large desktop, both fonts.
     let mut w = 320.0;
     while w <= 2560.0 {
         let mut h = 300.0;
@@ -326,8 +275,8 @@ fn sweep_never_overflows() {
 #[test]
 fn solver_is_deterministic() {
     for (w, h, _) in TARGETS {
-        let a = solve(Viewport::new(w, h), SafeArea::ZERO, Area::Overview, &HURMIT);
-        let b = solve(Viewport::new(w, h), SafeArea::ZERO, Area::Overview, &HURMIT);
+        let a = solve(Viewport::new(w, h), SafeArea::ZERO, Area::Ci, &HURMIT);
+        let b = solve(Viewport::new(w, h), SafeArea::ZERO, Area::Ci, &HURMIT);
         assert_eq!(a, b);
     }
 }
@@ -356,10 +305,13 @@ fn visual_viewport_mapping_and_routes() {
     );
     let route = muconsole_protocol::Route {
         area: Area::Fleet,
+        subview: muconsole_protocol::SubView::Fleet(muconsole_protocol::FleetSubView::WorkerNodes),
         repo: None,
         submodule: None,
         branch: None,
         job: None,
+        trace_id: None,
+        filter: None,
     };
     let f = solve_route(
         Viewport::new(1512.0, 860.0),

@@ -203,6 +203,10 @@ fn gen_view(r: &mut Rng) -> ViewModel {
         history: (0..r.len(3)).map(|_| gen_gate(r).summary()).collect(),
         nodes: sort_dedup(nodes, |n: &FabricNode| n.id.clone()),
         stale_since_epoch_ms: r.coin().then(|| r.next() % 100),
+        leases: Vec::new(),
+        sandboxes: Vec::new(),
+        registry: RegistryView::default(),
+        observe: ObserveView::default(),
     }
 }
 
@@ -384,4 +388,33 @@ fn deltas_on_absent_targets_are_ignored() {
         ],
     );
     assert_eq!(vm, ViewModel::default());
+}
+
+#[test]
+fn sanitize_public_log_redacts_private_ips_hosts_and_paths() {
+    let raw = "connect 192.168.42.117 on entrance.lab.local and rubicon /var/lib/action-runner/.cargo/bin/cargo";
+    let clean = sanitize_public_log(raw);
+    assert!(clean.contains("192.168.###.117"), "clean: {clean}");
+    assert!(!clean.contains("192.168.42.117"), "clean: {clean}");
+    assert!(!clean.contains("entrance"), "clean: {clean}");
+    assert!(!clean.contains("rubicon"), "clean: {clean}");
+    assert!(!clean.contains(".lab.local"), "clean: {clean}");
+    assert!(clean.contains(".../bin/cargo"), "clean: {clean}");
+}
+
+#[test]
+fn subviews_round_trip_and_step_within_area() {
+    for area in Area::ALL {
+        let views = SubView::all_for(area);
+        assert!(views.len() >= 2);
+        assert_eq!(SubView::default_for(area), views[0]);
+        for (idx, sv) in views.iter().copied().enumerate() {
+            assert_eq!(sv.area(), area);
+            assert!(!sv.label().is_empty());
+            let next = sv.step(1);
+            assert_eq!(next, views[(idx + 1) % views.len()]);
+            let prev = next.step(-1);
+            assert_eq!(prev, sv);
+        }
+    }
 }

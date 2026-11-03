@@ -18,6 +18,20 @@ All JSON field names and enum variants use `snake_case`, timestamps are Unix epo
   - `GET /api/cd/leases`
   - `GET /api/cd/events` (SSE stream)
   - Served on a dedicated read-only loopback listener (`MUCONDE_CD_API_ADDR`) behind the reverse proxy. Every `/api/cd/*` route requires `Authorization: Bearer <token>` loaded from `MUCONDE_CD_API_TOKEN_FILE` (trimmed, constant-time verified, fails closed with `401` if unset or empty).
+- **Registry Endpoints (`MuRegist`)**:
+  - `GET /api/reg/v1/packages`
+  - `GET /api/reg/v1/canaries`
+  - `GET /api/reg/v1/cas/status`
+  - Read-only (`GET`/`HEAD`) reverse-proxied from `/api/reg/` (and `/api/v1/registry/`) to `http://127.0.0.1:8443/api/`.
+- **Observability Endpoints (`MuObserve`)**:
+  - `GET /api/obs/v1/smartscape`
+  - `GET /api/obs/v1/problems`
+  - `GET /api/obs/v1/traces`
+  - `GET /api/obs/v1/traces/{trace_id}`
+  - `GET /api/obs/v1/logs`
+  - `GET /api/obs/v1/metrics/timeseries`
+  - `GET /api/obs/v1/store/status`
+  - Read-only (`GET`/`HEAD`) reverse-proxied from `/api/obs/` (and `/api/observe/`) to `http://127.0.0.1:9095/api/`. All log and span messages are sanitized via `sanitize_public_log` (`192.168.###.` IP masking and private hostname redaction).
 
 ______________________________________________________________________
 

@@ -11,8 +11,9 @@ use std::collections::BTreeSet;
 
 use muconsole_protocol::dto::paths;
 use muconsole_protocol::{
-    decode, encode, AreaBadges, CodecError, ConnState, DataEvent, DataSource, RepoId, Selection,
-    UiCommand, UiError, WorkerConfig, PROTOCOL_VERSION,
+    decode, encode, AreaBadges, CdSubView, CodecError, ConnState, DataEvent, DataSource,
+    ObserveSubView, RegistrySubView, RepoId, Selection, SubView, UiCommand, UiError, WorkerConfig,
+    PROTOCOL_VERSION,
 };
 
 use crate::api::{parse_event, parse_fetch, FetchKind, StreamId};
@@ -217,7 +218,44 @@ impl Engine {
             UiCommand::SelectRepo { repo, submodule } => {
                 self.select(Selection { repo, submodule }, now_ms, &mut fx);
             }
-            UiCommand::Retry => self.retry(now_ms, &mut fx),
+            UiCommand::SelectSubView(subview) => {
+                if self.mode == Mode::Live {
+                    match subview {
+                        SubView::Cd(CdSubView::ActiveLeases) => {
+                            self.fetch(FetchKind::Leases, &mut fx);
+                        }
+                        SubView::Registry(RegistrySubView::Packages) => {
+                            self.fetch(FetchKind::RegPackages, &mut fx);
+                        }
+                        SubView::Registry(RegistrySubView::CanaryTaints) => {
+                            self.fetch(FetchKind::RegCanaries, &mut fx);
+                        }
+                        SubView::Registry(RegistrySubView::CasHealth) => {
+                            self.fetch(FetchKind::RegCasStatus, &mut fx);
+                        }
+                        SubView::Observe(ObserveSubView::Smartscape) => {
+                            self.fetch(FetchKind::ObsSmartscape, &mut fx);
+                        }
+                        SubView::Observe(ObserveSubView::PurePath) => {
+                            self.fetch(FetchKind::ObsTraces, &mut fx);
+                        }
+                        SubView::Observe(ObserveSubView::ProblemsSlos) => {
+                            self.fetch(FetchKind::ObsProblems, &mut fx);
+                        }
+                        SubView::Observe(ObserveSubView::Logs) => {
+                            self.fetch(FetchKind::ObsLogs, &mut fx);
+                        }
+                        SubView::Observe(ObserveSubView::Metrics) => {
+                            self.fetch(FetchKind::ObsMetrics, &mut fx);
+                        }
+                        SubView::Observe(ObserveSubView::DataStore) => {
+                            self.fetch(FetchKind::ObsStoreStatus, &mut fx);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            UiCommand::Retry | UiCommand::ResetStream => self.retry(now_ms, &mut fx),
             UiCommand::SetVisibility { hidden } => {
                 self.out.set_hidden(hidden, now_ms);
                 let state = if hidden {
@@ -346,6 +384,17 @@ impl Engine {
             FetchKind::Topology(r) => paths::topology(&r.owner, &r.repo),
             FetchKind::Deployments(r) => paths::deployments(&r.owner, &r.repo, HISTORY_LIMIT),
             FetchKind::Gate(id) => paths::gate(id),
+            FetchKind::Leases => paths::LEASES.to_owned(),
+            FetchKind::RegPackages => paths::REG_PACKAGES.to_owned(),
+            FetchKind::RegCanaries => paths::REG_CANARIES.to_owned(),
+            FetchKind::RegCasStatus => paths::REG_CAS_STATUS.to_owned(),
+            FetchKind::ObsSmartscape => paths::OBS_SMARTSCAPE.to_owned(),
+            FetchKind::ObsProblems => paths::OBS_PROBLEMS.to_owned(),
+            FetchKind::ObsTraces => paths::OBS_TRACES.to_owned(),
+            FetchKind::ObsTraceDetail(id) => paths::obs_trace(id),
+            FetchKind::ObsLogs => paths::OBS_LOGS.to_owned(),
+            FetchKind::ObsMetrics => paths::OBS_METRICS.to_owned(),
+            FetchKind::ObsStoreStatus => paths::OBS_STORE_STATUS.to_owned(),
         };
         fx.push(Effect::Fetch {
             kind,

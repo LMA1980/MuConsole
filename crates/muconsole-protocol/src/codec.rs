@@ -106,11 +106,16 @@ mod tests {
             }),
             UiCommand::Subscribe(Route {
                 area: Area::Ci,
+                subview: SubView::Ci(CiSubView::Trainway),
                 repo: Some(repo("LMA1980", "MuConsole")),
                 submodule: None,
                 branch: Some("feat/phase1-foundation".to_string()),
                 job: Some(1234),
+                trace_id: Some("tr-ci-1234".to_string()),
+                filter: Some("ERRORS".to_string()),
             }),
+            UiCommand::SelectSubView(SubView::Observe(ObserveSubView::PurePath)),
+            UiCommand::ResetStream,
             UiCommand::SelectRepo {
                 repo: repo("LMA1980", "model-runner"),
                 submodule: Some(SubmoduleId {
@@ -168,9 +173,10 @@ mod tests {
             }),
             DataEvent::Error(UiError::UnknownScenario("nope".to_string())),
             DataEvent::AreaBadges(AreaBadges {
-                overview: 0,
                 ci: 2,
                 cd: 1,
+                registry: 1,
+                observe: 2,
                 fleet: 1,
             }),
             DataEvent::Heartbeat { seq: 7 },

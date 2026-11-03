@@ -1,26 +1,34 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Main-thread bootstrap (wasm32 only): spawn the data worker, forward
-//! configuration and visibility, log received view updates, and show the
-//! "reload required" banner on a protocol mismatch. Components arrive in
-//! Phase 3.
+//! configuration and visibility, bind DOM click/key/input/hash/wheel events
+//! across all 5 Areas and 17 Sub-Views, and show the "reload required"
+//! banner on a protocol mismatch.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use js_sys::{Array, ArrayBuffer, Uint8Array};
+use js_sys::{Array, ArrayBuffer, Date, Uint8Array};
 use muconsole_layout::{SafeArea, Viewport};
 use muconsole_protocol::{UiCommand, WorkerConfig};
 use muconsole_theme::wireframe::WireframeSkin;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
-use web_sys::{console, MessageEvent, Worker};
+use web_sys::{
+    console, Element, Event, HtmlInputElement, KeyboardEvent, MessageEvent, MouseEvent, WheelEvent,
+    Worker,
+};
 
 use crate::client::{reload_banner_text, ClientUpdate, DataClient, WORKER_URL};
 use crate::components::{render_console, render_html_shell};
-use crate::state::ConsoleState;
+use crate::router::{area_slug, format_hash};
+use crate::state::{font_slug, ConsoleState, FONT_STORAGE_KEY, REPO_STORAGE_KEY};
 
 thread_local! {
     static WORKER: RefCell<Option<Worker>> = const { RefCell::new(None) };
+}
+
+fn now_ms() -> u64 {
+    Date::now() as u64
 }
 
 /// Post a command as a transferred `ArrayBuffer`.
@@ -28,6 +36,29 @@ fn send(worker: &Worker, cmd: &UiCommand) {
     if let Ok(bytes) = DataClient::encode_command(cmd) {
         let buf = Uint8Array::from(bytes.as_slice()).buffer();
         let _ = worker.post_message_with_transfer(&buf, &Array::of1(&buf));
+    }
+}
+
+fn send_all(worker: &Worker, cmds: &[UiCommand]) {
+    for cmd in cmds {
+        send(worker, cmd);
+    }
+}
+
+fn sync_browser_state(st: &ConsoleState) {
+    let Some(win) = web_sys::window() else {
+        return;
+    };
+    let desired_hash = format_hash(&st.route);
+    let current_hash = win.location().hash().unwrap_or_default();
+    if current_hash != desired_hash {
+        let _ = win.location().set_hash(&desired_hash);
+    }
+    if let Ok(Some(storage)) = win.local_storage() {
+        let _ = storage.set_item(FONT_STORAGE_KEY, font_slug(st.font));
+        if let Some(repo_str) = st.stored_repo_value() {
+            let _ = storage.set_item(REPO_STORAGE_KEY, &repo_str);
+        }
     }
 }
 
@@ -52,27 +83,111 @@ fn show_banner(text: &str) {
     }
 }
 
-fn repaint(st: &ConsoleState) {
-    if let Some(win) = web_sys::window() {
-        let w = win
-            .inner_width()
-            .ok()
-            .and_then(|v| v.as_f64())
-            .unwrap_or(1512.0);
-        let h = win
-            .inner_height()
-            .ok()
-            .and_then(|v| v.as_f64())
-            .unwrap_or(860.0);
-        let svg = render_console(&WireframeSkin, st, Viewport::new(w, h), SafeArea::ZERO);
-        let html = render_html_shell(&svg, st);
-        if let Some(body) = win.document().and_then(|d| d.body()) {
-            body.set_inner_html(&html);
+fn ensure_dyslexic_stylesheet(doc: &web_sys::Document) {
+    if doc.get_element_by_id("muconsole-dyslexic-font").is_some() {
+        return;
+    }
+    if let Ok(style) = doc.create_element("style") {
+        style.set_id("muconsole-dyslexic-font");
+        style.set_text_content(Some(
+            "@font-face{font-family:'OpenDyslexicM Nerd Font Mono';src:url('/fonts/OpenDyslexicMNerdFontMono-Regular.woff2') format('woff2');font-display:swap;}",
+        ));
+        if let Some(body) = doc.body() {
+            let _ = body.append_child(&style);
         }
     }
 }
 
-/// Spawn the worker and wire the message bridge.
+fn repaint(st: &ConsoleState) {
+    let Some(win) = web_sys::window() else {
+        return;
+    };
+    let Some(doc) = win.document() else {
+        return;
+    };
+    let w = win
+        .inner_width()
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1512.0);
+    let h = win
+        .inner_height()
+        .ok()
+        .and_then(|v| v.as_f64())
+        .unwrap_or(860.0);
+    let svg = render_console(&WireframeSkin, st, Viewport::new(w, h), SafeArea::ZERO);
+
+    if let Some(dash) = doc.get_element_by_id("muconsole-dashboard") {
+        dash.set_inner_html(&svg);
+        if let Some(shell) = doc.get_element_by_id("muconsole-shell") {
+            let _ = shell.set_attribute("data-crt-font", font_slug(st.font));
+            let _ = shell.set_attribute(
+                "data-lazy-dyslexic",
+                if st.lazy_dyslexic_loaded {
+                    "true"
+                } else {
+                    "false"
+                },
+            );
+            let _ = shell.set_attribute("data-area", area_slug(st.route.area));
+            let _ = shell.set_attribute("data-subview", st.route.subview.slug());
+        }
+        if st.lazy_dyslexic_loaded {
+            ensure_dyslexic_stylesheet(&doc);
+        }
+        if let Some(polite) = doc.get_element_by_id("muconsole-aria-polite") {
+            polite.set_text_content(Some(&st.aria_polite));
+        }
+        if let Some(assertive) = doc.get_element_by_id("muconsole-aria-assertive") {
+            assertive.set_text_content(Some(&st.aria_assertive));
+        }
+        if let Some(input) = doc
+            .get_element_by_id("muconsole-filter")
+            .and_then(|e| e.dyn_into::<HtmlInputElement>().ok())
+        {
+            if input.value() != st.filter_query {
+                input.set_value(&st.filter_query);
+            }
+        }
+    } else if let Some(body) = doc.body() {
+        let html = render_html_shell(&svg, st);
+        body.set_inner_html(&html);
+    }
+}
+
+fn find_action_attribute(target: &Element) -> Option<(&'static str, String)> {
+    const ATTRS: [&str; 13] = [
+        "data-trace-id",
+        "data-cd-gate",
+        "data-area",
+        "data-subview",
+        "data-repo-step",
+        "data-dyslexia-toggle",
+        "data-trainway-restart",
+        "data-ecosystem",
+        "data-package",
+        "data-entity-id",
+        "data-purepath-filter",
+        "data-span-id",
+        "data-log-severity",
+    ];
+    for attr in ATTRS {
+        let selector = format!("[{attr}]");
+        if let Ok(Some(el)) = target.closest(&selector) {
+            if let Some(val) = el.get_attribute(attr) {
+                return Some((attr, val));
+            }
+        }
+    }
+    if let Ok(Some(el)) = target.closest("[data-control-id]") {
+        if let Some(val) = el.get_attribute("data-control-id") {
+            return Some(("data-control-id", val));
+        }
+    }
+    None
+}
+
+/// Spawn the worker and wire the message and DOM interaction bridges.
 pub fn start() {
     let Some(window) = web_sys::window() else {
         return;
@@ -86,9 +201,23 @@ pub fn start() {
     {
         let hash = location.hash().unwrap_or_default();
         let search = location.search().unwrap_or_default();
-        state.borrow_mut().init_from_env(&hash, &search, None);
-        repaint(&state.borrow());
+        let stored_font = window
+            .local_storage()
+            .ok()
+            .flatten()
+            .and_then(|s| s.get_item(FONT_STORAGE_KEY).ok().flatten());
+        let stored_repo = window
+            .local_storage()
+            .ok()
+            .flatten()
+            .and_then(|s| s.get_item(REPO_STORAGE_KEY).ok().flatten());
+        let mut st = state.borrow_mut();
+        st.init_from_env(&hash, &search, stored_font.as_deref());
+        st.restore_stored_repo(stored_repo.as_deref());
+        sync_browser_state(&st);
+        repaint(&st);
     }
+
     let worker = match Worker::new(WORKER_URL) {
         Ok(w) => w,
         Err(e) => {
@@ -96,6 +225,14 @@ pub fn start() {
             return;
         }
     };
+
+    {
+        let st = state.borrow();
+        send(&worker, &UiCommand::Configure(cfg));
+        send(&worker, &UiCommand::Subscribe(st.route.clone()));
+        send(&worker, &UiCommand::SelectSubView(st.route.subview));
+    }
+
     let state_for_msg = Rc::clone(&state);
     let onmessage = Closure::<dyn FnMut(MessageEvent)>::new(move |ev: MessageEvent| {
         let data = ev.data();
@@ -109,6 +246,7 @@ pub fn start() {
                 show_banner(&reload_banner_text(expected, found));
             }
             ClientUpdate::View => {
+                sync_browser_state(&st);
                 repaint(&st);
                 console::log_1(&JsValue::from_str(&st.client.summary()));
             }
@@ -124,6 +262,7 @@ pub fn start() {
     worker.set_onmessage(Some(onmessage.as_ref().unchecked_ref()));
     onmessage.forget();
 
+    // Window resize listener.
     {
         let state_for_resize = Rc::clone(&state);
         let on_resize = Closure::<dyn FnMut()>::new(move || {
@@ -134,21 +273,184 @@ pub fn start() {
         on_resize.forget();
     }
 
-    send(&worker, &UiCommand::Configure(cfg));
-
-    if let Some(doc) = window.document() {
-        let w = worker.clone();
-        let on_visibility = Closure::<dyn FnMut()>::new(move || {
-            let hidden = web_sys::window()
-                .and_then(|w| w.document())
-                .is_some_and(|d| d.hidden());
-            send(&w, &UiCommand::SetVisibility { hidden });
+    // Window hashchange listener.
+    {
+        let state_for_hash = Rc::clone(&state);
+        let worker_for_hash = worker.clone();
+        let on_hashchange = Closure::<dyn FnMut()>::new(move || {
+            let Some(win) = web_sys::window() else {
+                return;
+            };
+            let hash = win.location().hash().unwrap_or_default();
+            let mut st = state_for_hash.borrow_mut();
+            if format_hash(&st.route) != hash {
+                st.apply_hash(&hash);
+                let cmds = vec![
+                    UiCommand::Subscribe(st.route.clone()),
+                    UiCommand::SelectSubView(st.route.subview),
+                ];
+                send_all(&worker_for_hash, &cmds);
+                sync_browser_state(&st);
+                repaint(&st);
+            }
         });
-        let _ = doc.add_event_listener_with_callback(
-            "visibilitychange",
-            on_visibility.as_ref().unchecked_ref(),
-        );
-        on_visibility.forget();
+        let _ = window
+            .add_event_listener_with_callback("hashchange", on_hashchange.as_ref().unchecked_ref());
+        on_hashchange.forget();
     }
+
+    // Document delegated click listener, keydown listener, wheel listener, and visibilitychange.
+    if let Some(doc) = window.document() {
+        {
+            let state_for_click = Rc::clone(&state);
+            let worker_for_click = worker.clone();
+            let on_click = Closure::<dyn FnMut(MouseEvent)>::new(move |ev: MouseEvent| {
+                let Some(target) = ev.target().and_then(|t| t.dyn_into::<Element>().ok()) else {
+                    return;
+                };
+                if let Some((attr, val)) = find_action_attribute(&target) {
+                    let mut st = state_for_click.borrow_mut();
+                    let cmds = st.on_dom_action(attr, &val, ev.shift_key(), now_ms());
+                    send_all(&worker_for_click, &cmds);
+                    sync_browser_state(&st);
+                    repaint(&st);
+                }
+            });
+            let _ =
+                doc.add_event_listener_with_callback("click", on_click.as_ref().unchecked_ref());
+            on_click.forget();
+        }
+
+        {
+            let state_for_key = Rc::clone(&state);
+            let worker_for_key = worker.clone();
+            let on_keydown = Closure::<dyn FnMut(KeyboardEvent)>::new(move |ev: KeyboardEvent| {
+                let key = ev.key();
+                let target_is_input = ev
+                    .target()
+                    .and_then(|t| t.dyn_into::<Element>().ok())
+                    .is_some_and(|el| el.id() == "muconsole-filter");
+                if target_is_input && key != "Escape" {
+                    return;
+                }
+                if key == "/" && !target_is_input {
+                    ev.prevent_default();
+                    if let Some(input) = web_sys::window()
+                        .and_then(|w| w.document())
+                        .and_then(|d| d.get_element_by_id("muconsole-filter"))
+                        .and_then(|e| e.dyn_into::<HtmlInputElement>().ok())
+                    {
+                        let _ = input.focus();
+                    }
+                }
+                let mut st = state_for_key.borrow_mut();
+                if let Some(cmd) = st.on_key(&key, ev.shift_key(), now_ms()) {
+                    send(&worker_for_key, &cmd);
+                }
+                if key == "Escape" && target_is_input {
+                    if let Some(input) = web_sys::window()
+                        .and_then(|w| w.document())
+                        .and_then(|d| d.get_element_by_id("muconsole-filter"))
+                        .and_then(|e| e.dyn_into::<HtmlInputElement>().ok())
+                    {
+                        let _ = input.blur();
+                    }
+                }
+                sync_browser_state(&st);
+                repaint(&st);
+            });
+            let _ = doc
+                .add_event_listener_with_callback("keydown", on_keydown.as_ref().unchecked_ref());
+            on_keydown.forget();
+        }
+
+        {
+            let state_for_input = Rc::clone(&state);
+            let on_input = Closure::<dyn FnMut(Event)>::new(move |ev: Event| {
+                let Some(input) = ev
+                    .target()
+                    .and_then(|t| t.dyn_into::<HtmlInputElement>().ok())
+                else {
+                    return;
+                };
+                if input.id() != "muconsole-filter" {
+                    return;
+                }
+                let val = input.value();
+                let mut st = state_for_input.borrow_mut();
+                st.set_filter_query(&val, now_ms());
+                sync_browser_state(&st);
+                repaint(&st);
+            });
+            let _ =
+                doc.add_event_listener_with_callback("input", on_input.as_ref().unchecked_ref());
+            on_input.forget();
+        }
+
+        {
+            let state_for_wheel = Rc::clone(&state);
+            let on_wheel = Closure::<dyn FnMut(WheelEvent)>::new(move |ev: WheelEvent| {
+                let Some(target) = ev.target().and_then(|t| t.dyn_into::<Element>().ok()) else {
+                    return;
+                };
+                let in_top_bar = target
+                    .closest("[data-control-id='c2-top-bar'], [data-repo-step]")
+                    .ok()
+                    .flatten()
+                    .is_some();
+                if !in_top_bar {
+                    return;
+                }
+                ev.prevent_default();
+                let delta = if ev.delta_y() > 0.0 { 1 } else { -1 };
+                let mut st = state_for_wheel.borrow_mut();
+                if ev.shift_key() {
+                    st.rotate_inner(delta, now_ms());
+                } else {
+                    st.rotate_outer(delta, now_ms());
+                }
+                sync_browser_state(&st);
+                repaint(&st);
+            });
+            let _ =
+                doc.add_event_listener_with_callback("wheel", on_wheel.as_ref().unchecked_ref());
+            on_wheel.forget();
+        }
+
+        {
+            let w = worker.clone();
+            let on_visibility = Closure::<dyn FnMut()>::new(move || {
+                let hidden = web_sys::window()
+                    .and_then(|w| w.document())
+                    .is_some_and(|d| d.hidden());
+                send(&w, &UiCommand::SetVisibility { hidden });
+            });
+            let _ = doc.add_event_listener_with_callback(
+                "visibilitychange",
+                on_visibility.as_ref().unchecked_ref(),
+            );
+            on_visibility.forget();
+        }
+    }
+
+    // Periodic 50ms tick for rotary settle debounce (`ROTARY_SETTLE_MS = 350`).
+    {
+        let state_for_tick = Rc::clone(&state);
+        let worker_for_tick = worker.clone();
+        let on_tick = Closure::<dyn FnMut()>::new(move || {
+            let mut st = state_for_tick.borrow_mut();
+            let cmds = st.tick(now_ms());
+            if !cmds.is_empty() {
+                send_all(&worker_for_tick, &cmds);
+                sync_browser_state(&st);
+            }
+        });
+        let _ = window.set_interval_with_callback_and_timeout_and_arguments_0(
+            on_tick.as_ref().unchecked_ref(),
+            50,
+        );
+        on_tick.forget();
+    }
+
     WORKER.with(|slot| *slot.borrow_mut() = Some(worker));
 }

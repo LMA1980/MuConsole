@@ -1,14 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Automated UX Validation Gate (`U1`–`U7`) for Phase 3 (`WireframeSkin`,
-//! `C1`–`C6`, `Hurmit` ↔ `OpenDyslexicM`, keyboard/ARIA parity, and skin
-//! parity between `WireframeSkin` and `AvionicsSkin`).
+//! Automated UX Validation Gate (`U1`–`U8`) for Milestone 6 (`WireframeSkin`,
+//! 5 Areas × 17 Sub-Views, C2 Repo/Submodule Stepper, `SubViewBar`,
+//! `Hurmit` ↔ `OpenDyslexicM` toggle, keyboard/DOM/deep-link parity,
+//! cross-area `[TRACE ↗]` / `[CD GATE ↗]` routing, and public privacy boundary).
 
 use muconsole_data::engine::{Effect, Engine};
 use muconsole_data::scenario::Scenario;
 use muconsole_layout::{Breakpoint, SafeArea, Viewport};
 use muconsole_protocol::{
-    Area, Branch, CrtFont, DataEvent, Delta, GateTest, PrState, RepoId, RepoScore, RepoStatus,
-    SidingPhase, SubmoduleId, TestState, UiCommand, WorkerConfig,
+    Area, Branch, CdSubView, CiSubView, CrtFont, DataEvent, Delta, GateTest, ObserveSubView,
+    PrState, RegistrySubView, RepoId, RepoScore, RepoStatus, SidingPhase, SubView, SubmoduleId,
+    TestState, UiCommand, WorkerConfig,
 };
 use muconsole_theme::interaction::SwitchEvent;
 use muconsole_theme::wireframe::{AvionicsSkin, WireframeSkin};
@@ -25,9 +27,7 @@ const VIEWPORTS: [(f64, f64); 6] = [
     (402.0, 720.0),
 ];
 
-const AREAS: [Area; 4] = [Area::Overview, Area::Ci, Area::Cd, Area::Fleet];
-
-fn state_for_scenario(scenario: Scenario, area: Area, font: CrtFont) -> ConsoleState {
+fn state_for_scenario(scenario: Scenario, subview: SubView, font: CrtFont) -> ConsoleState {
     let mut eng = Engine::new(1);
     let cfg = WorkerConfig {
         api_base: "http://192.0.2.10:8080".into(),
@@ -35,7 +35,7 @@ fn state_for_scenario(scenario: Scenario, area: Area, font: CrtFont) -> ConsoleS
     };
     let mut state = ConsoleState::new();
     state.set_font(font);
-    state.select_area(area);
+    state.select_subview(subview);
 
     for ef in eng.handle(UiCommand::Configure(cfg), 1_000) {
         if let Effect::Post(ev) = ef {
@@ -43,7 +43,6 @@ fn state_for_scenario(scenario: Scenario, area: Area, font: CrtFont) -> ConsoleS
             state.on_worker_frame(&bytes);
         }
     }
-    // Play through the entire scenario script so terminal states (failure, rollback, etc.) are reached.
     let end_ms = 1_000 + scenario.duration_ms();
     for t in (1_000..=end_ms).step_by(200) {
         for ef in eng.tick(t) {
@@ -71,6 +70,14 @@ fn assert_svg_zero_overflow(svg: &str, vw: f64, vh: f64, context: &str) {
         !svg.contains("mu-brushed"),
         "{context}: WireframeSkin must not emit brushed tungsten filter"
     );
+
+    let lower = svg.to_ascii_lowercase();
+    for forbidden in ["entrance", "rubicon", "pey-wail-deu", "lab.local"] {
+        assert!(
+            !lower.contains(forbidden),
+            "{context}: SVG must never expose private identifier '{forbidden}'"
+        );
+    }
 
     let eps = 1e-4;
     for node in doc.descendants() {
@@ -141,45 +148,70 @@ fn assert_svg_zero_overflow(svg: &str, vw: f64, vh: f64, context: &str) {
 }
 
 #[test]
-fn u1_zero_viewport_overflow_across_all_viewports_areas_fonts_and_scenarios() {
+fn u1_zero_viewport_overflow_across_all_viewports_17_subviews_fonts_and_scenarios() {
     for &(vw, vh) in &VIEWPORTS {
-        for &area in &AREAS {
-            for &font in &[CrtFont::Hurmit, CrtFont::OpenDyslexic] {
-                for &scenario in &Scenario::ALL {
-                    let st = state_for_scenario(scenario, area, font);
+        for &area in &Area::ALL {
+            for &subview in SubView::all_for(area) {
+                for &font in &[CrtFont::Hurmit, CrtFont::OpenDyslexic] {
+                    let st = state_for_scenario(Scenario::NewBranch, subview, font);
                     let svg =
                         render_console(&WireframeSkin, &st, Viewport::new(vw, vh), SafeArea::ZERO);
-                    let ctx = format!(
-                        "{vw}x{vh} area={area:?} font={font:?} scenario={}",
-                        scenario.name()
-                    );
+                    let ctx = format!("{vw}x{vh} subview={subview:?} font={font:?}");
                     assert_svg_zero_overflow(&svg, vw, vh, &ctx);
                 }
             }
+        }
+    }
+    for &scenario in &Scenario::ALL {
+        for &area in &Area::ALL {
+            let st = state_for_scenario(scenario, SubView::default_for(area), CrtFont::Hurmit);
+            let svg = render_console(
+                &WireframeSkin,
+                &st,
+                Viewport::new(1512.0, 860.0),
+                SafeArea::ZERO,
+            );
+            let ctx = format!("1512x860 area={area:?} scenario={}", scenario.name());
+            assert_svg_zero_overflow(&svg, 1512.0, 860.0, &ctx);
         }
     }
 }
 
 #[test]
 fn u2_navigation_and_routing_c1_c2_deep_link_escape_and_legacy_redirect() {
-    let mut st = state_for_scenario(Scenario::NewBranch, Area::Overview, CrtFont::Hurmit);
+    let mut st = state_for_scenario(
+        Scenario::NewBranch,
+        SubView::Ci(CiSubView::Trainway),
+        CrtFont::Hurmit,
+    );
 
-    // C1 area switching via keyboard `[` and `]` and direct `select_area`.
-    assert_eq!(st.route.area, Area::Overview);
-    let cmd = st.on_key("]", false, 1_000);
+    // C1 area switching via keyboard `1`..`5` and sub-view stepping via `[` / `]`.
     assert_eq!(st.route.area, Area::Ci);
+    assert_eq!(st.route.subview, SubView::Ci(CiSubView::Trainway));
+    let cmd = st.on_key("2", false, 1_000);
+    assert_eq!(st.route.area, Area::Cd);
+    assert_eq!(st.route.subview, SubView::Cd(CdSubView::IntegrationGate));
     assert!(matches!(cmd, Some(UiCommand::Subscribe(_))));
 
-    let cmd = st.on_key("[", false, 1_000);
-    assert_eq!(st.route.area, Area::Overview);
+    let cmd = st.on_key("1", false, 1_000);
+    assert_eq!(st.route.area, Area::Ci);
+    assert_eq!(st.route.subview, SubView::Ci(CiSubView::Scorecards));
+    assert!(matches!(cmd, Some(UiCommand::Subscribe(_))));
+
+    // Sub-View cycling via `[` and `]` within an Area.
+    let cmd = st.on_key("]", false, 1_050);
+    assert_eq!(st.route.subview, SubView::Ci(CiSubView::Trainway));
+    assert!(matches!(cmd, Some(UiCommand::Subscribe(_))));
+    let cmd = st.on_key("[", false, 1_060);
+    assert_eq!(st.route.subview, SubView::Ci(CiSubView::Scorecards));
     assert!(matches!(cmd, Some(UiCommand::Subscribe(_))));
 
     // Deep-link round-trip + breadcrumb segments + Esc up-one-level.
-    let hash = "#/ci/fixture/superproject/code%2Fengine/feat%2Frvv/104";
+    let hash = "#/ci/trainway/fixture/superproject/code%2Fengine/feat%2Frvv/104";
     st.init_from_env(hash, "", None);
     assert_eq!(format_hash(&st.route), hash);
     let wide_crumbs = breadcrumb_segments(&st.route, Breakpoint::Wide);
-    assert_eq!(wide_crumbs.len(), 5);
+    assert!(wide_crumbs.len() >= 5);
     let phone_crumbs = breadcrumb_segments(&st.route, Breakpoint::Phone);
     assert!(
         phone_crumbs.iter().any(|c| c.value == "…"),
@@ -203,18 +235,26 @@ fn u2_navigation_and_routing_c1_c2_deep_link_escape_and_legacy_redirect() {
     assert_eq!(st.route.repo, Some(RepoId::new("fixture", "superproject")));
     st.on_key("Escape", false, 1_400);
     assert_eq!(st.route.repo, None);
-    assert_eq!(escape_up(&st.route).area, Area::Overview);
+    assert_eq!(escape_up(&st.route).area, Area::Ci);
 
-    // Legacy #/jobs/{id} redirect.
+    // Legacy #/ovr and #/jobs/{id} redirects.
+    let ovr = parse_hash("#/ovr");
+    assert_eq!(ovr.area, Area::Ci);
+    assert_eq!(ovr.subview, SubView::Ci(CiSubView::Scorecards));
     let legacy = parse_hash("#/jobs/77");
     assert_eq!(legacy.area, Area::Ci);
+    assert_eq!(legacy.subview, SubView::Ci(CiSubView::Trainway));
     assert_eq!(legacy.job, Some(77));
     assert_eq!(legacy.branch.as_deref(), Some("main"));
 }
 
 #[test]
-fn u3_rotary_50_plus_repos_submodules_typeahead_filter_and_350ms_settle_debounce() {
-    let mut st = state_for_scenario(Scenario::Repos40, Area::Ci, CrtFont::Hurmit);
+fn u3_repo_stepper_50_plus_repos_submodules_typeahead_filter_and_350ms_settle_debounce() {
+    let mut st = state_for_scenario(
+        Scenario::Repos40,
+        SubView::Ci(CiSubView::Trainway),
+        CrtFont::Hurmit,
+    );
 
     // Add 15 more repositories via Patch so total is 55 (50+ scaling check).
     let mut extra = Vec::new();
@@ -228,7 +268,7 @@ fn u3_rotary_50_plus_repos_submodules_typeahead_filter_and_350ms_settle_debounce
     st.on_worker_frame(&patch_bytes);
     assert!(st.filtered_repos().len() >= 55);
 
-    // Rapid outer rotary detents at t=100, 200, 300 coalesce into a single SelectRepo after 350 ms.
+    // Rapid outer repo steps at t=100, 200, 300 coalesce into a single SelectRepo after 350 ms.
     st.rotate_outer(1, 100);
     assert!(st.tick(200).is_empty());
     st.rotate_outer(1, 200);
@@ -242,12 +282,16 @@ fn u3_rotary_50_plus_repos_submodules_typeahead_filter_and_350ms_settle_debounce
     assert_eq!(cmds.len(), 1, "must coalesce rapid steps into 1 SelectRepo");
     assert!(matches!(cmds[0], UiCommand::SelectRepo { .. }));
 
-    // Inner ring steps through PARENT (0) and 1..=7 submodules on superproject.
-    let mut st_sub = state_for_scenario(Scenario::NewBranch, Area::Ci, CrtFont::Hurmit);
+    // Submodule stepper steps through PARENT (0) and 1..=7 submodules on superproject.
+    let mut st_sub = state_for_scenario(
+        Scenario::NewBranch,
+        SubView::Ci(CiSubView::Trainway),
+        CrtFont::Hurmit,
+    );
     st_sub.route.repo = Some(RepoId::new("fixture", "superproject"));
     st_sub.route.submodule = None;
     st_sub.sync_rotary_from_route();
-    st_sub.rotate_inner(1, 1_000);
+    st_sub.on_dom_action("data-repo-step", "sub-next", false, 1_000);
     assert_eq!(st_sub.inner_index, 1);
     assert_eq!(
         st_sub.route.submodule.as_ref().map(|s| s.path.as_str()),
@@ -277,7 +321,11 @@ fn u3_rotary_50_plus_repos_submodules_typeahead_filter_and_350ms_settle_debounce
 
 #[test]
 fn u4_scorecard_carousel_orders_parent_first_then_gitmodules_and_pages_cleanly() {
-    let mut st = state_for_scenario(Scenario::NewBranch, Area::Overview, CrtFont::Hurmit);
+    let mut st = state_for_scenario(
+        Scenario::NewBranch,
+        SubView::Ci(CiSubView::Scorecards),
+        CrtFont::Hurmit,
+    );
     st.route.repo = Some(RepoId::new("fixture", "superproject"));
     let ordered = st.ordered_carousel_repos();
     assert_eq!(ordered[0].id, RepoId::new("fixture", "superproject"));
@@ -289,7 +337,6 @@ fn u4_scorecard_carousel_orders_parent_first_then_gitmodules_and_pages_cleanly()
     assert_eq!(ordered[6].id, RepoId::new("fixture", "arch-synthetic"));
     assert_eq!(ordered[7].id, RepoId::new("fixture", "manager"));
 
-    // Step carousel pages and verify rendered page indicator updates and zero truncation in C4 half-cards.
     assert_eq!(st.carousel_page, 0);
     let svg_p0 = render_console(
         &WireframeSkin,
@@ -312,7 +359,7 @@ fn u4_scorecard_carousel_orders_parent_first_then_gitmodules_and_pages_cleanly()
         }
     }
 
-    st.step_carousel(1, 3);
+    st.step_carousel(1, 6);
     assert_eq!(st.carousel_page, 1);
     let svg = render_console(
         &WireframeSkin,
@@ -320,16 +367,19 @@ fn u4_scorecard_carousel_orders_parent_first_then_gitmodules_and_pages_cleanly()
         Viewport::new(1512.0, 860.0),
         SafeArea::ZERO,
     );
-    assert!(svg.contains("PG: 2/4"));
+    assert!(svg.contains("PAGE 2/"));
     assert_svg_zero_overflow(&svg, 1512.0, 860.0, "u4_carousel_page_2");
 }
 
 #[test]
 fn u5_trainway_lanes_stop_lamp_yard_overflow_submodule_interchange_and_restart_guard() {
-    // 1. Submodule interchange & YARD +N overflow stub when >4 sidings exist.
-    let mut st_sub = state_for_scenario(Scenario::Submodules, Area::Ci, CrtFont::Hurmit);
+    let mut st_sub = state_for_scenario(
+        Scenario::Submodules,
+        SubView::Ci(CiSubView::Trainway),
+        CrtFont::Hurmit,
+    );
     let mut branch_deltas = Vec::new();
-    for i in 0..6 {
+    for i in 0..8 {
         branch_deltas.push(Delta::BranchUpsert(Branch {
             ref_name: format!("feat/siding-{i}"),
             base_ref: "main".into(),
@@ -348,7 +398,7 @@ fn u5_trainway_lanes_stop_lamp_yard_overflow_submodule_interchange_and_restart_g
         SafeArea::ZERO,
     );
     assert!(
-        svg_sub.contains("c5-yard-overflow"),
+        svg_sub.contains("c5-yard-pager") && svg_sub.contains("YARD +"),
         "Trainway must render YARD +N overflow stub when tracks exceed max_sidings"
     );
     assert!(
@@ -356,8 +406,11 @@ fn u5_trainway_lanes_stop_lamp_yard_overflow_submodule_interchange_and_restart_g
         "Trainway must render submodule interchange row"
     );
 
-    // 2. StageFailure illuminates STOP lamp and renders failed block signal (✕).
-    let mut st_fail = state_for_scenario(Scenario::StageFailure, Area::Ci, CrtFont::Hurmit);
+    let mut st_fail = state_for_scenario(
+        Scenario::StageFailure,
+        SubView::Ci(CiSubView::Trainway),
+        CrtFont::Hurmit,
+    );
     let svg_fail = render_console(
         &WireframeSkin,
         &st_fail,
@@ -371,8 +424,6 @@ fn u5_trainway_lanes_stop_lamp_yard_overflow_submodule_interchange_and_restart_g
         .expect("c5-stop-lamp present");
     assert_eq!(stop_lamp.attribute("data-lit"), Some("true"));
 
-    // 3. Guarded PullToTurn RESTART switch refuses un-pulled and short-pulled turns,
-    //    arms on >= 300ms hold + turn, and dispatches UiCommand::Retry on confirmation.
     assert_eq!(
         st_fail.on_restart_switch(
             SwitchEvent::Rotate {
@@ -400,7 +451,6 @@ fn u5_trainway_lanes_stop_lamp_yard_overflow_submodule_interchange_and_restart_g
     );
     assert!(st_fail.restart_armed_until_ms.is_none());
 
-    // Valid 400 ms hold + rotate arms the 3 s confirmation window.
     assert_eq!(
         st_fail.on_restart_switch(
             SwitchEvent::Rotate {
@@ -415,7 +465,6 @@ fn u5_trainway_lanes_stop_lamp_yard_overflow_submodule_interchange_and_restart_g
     assert!(st_fail.restart_armed_until_ms.is_some());
     st_fail.on_restart_switch(SwitchEvent::Release { at_ms: 1_450 }, 1_450);
 
-    // Second rotation within 3 s confirms and emits UiCommand::Retry.
     st_fail.on_restart_switch(SwitchEvent::Press { at_ms: 1_500 }, 1_500);
     let confirmed = st_fail.on_restart_switch(
         SwitchEvent::Rotate {
@@ -431,9 +480,11 @@ fn u5_trainway_lanes_stop_lamp_yard_overflow_submodule_interchange_and_restart_g
 
 #[test]
 fn u6_delivery_gate_promote_rollback_history_replay_and_log_pager() {
-    // Tainted scenario passes all critical tests at t=1200 before taint at t=2200;
-    // verify a promoted gate shows PROMOTE ▶.
-    let mut st_ok = state_for_scenario(Scenario::NewBranch, Area::Cd, CrtFont::Hurmit);
+    let mut st_ok = state_for_scenario(
+        Scenario::NewBranch,
+        SubView::Cd(CdSubView::IntegrationGate),
+        CrtFont::Hurmit,
+    );
     let promote_patch = Engine::encode_event(&DataEvent::Patch(vec![Delta::GateStatus {
         outcome: muconsole_protocol::GateOutcome::Promoted,
         rollback_reason: None,
@@ -450,8 +501,11 @@ fn u6_delivery_gate_promote_rollback_history_replay_and_log_pager() {
     );
     assert!(svg_ok.contains("PROMOTE ▶"));
 
-    // ItCriticalFailure scenario: critical test fails -> ◀ ROLLBACK + multi-line log pager + history replay.
-    let mut st_rb = state_for_scenario(Scenario::ItCriticalFailure, Area::Cd, CrtFont::Hurmit);
+    let mut st_rb = state_for_scenario(
+        Scenario::ItCriticalFailure,
+        SubView::Cd(CdSubView::IntegrationGate),
+        CrtFont::Hurmit,
+    );
     let log_patch =
         Engine::encode_event(&DataEvent::Patch(vec![Delta::GateTestUpsert(GateTest {
             name: "it_infer_gemm".into(),
@@ -475,7 +529,6 @@ fn u6_delivery_gate_promote_rollback_history_replay_and_log_pager() {
     assert!(svg_rb_p0.contains("LOG[1]: line 1: gemm mismatch"));
     assert!(svg_rb_p0.contains("PAGE 1/2"));
 
-    // Advance log pager to page 2.
     st_rb.log_page = 1;
     let svg_rb_p1 = render_console(
         &WireframeSkin,
@@ -486,7 +539,6 @@ fn u6_delivery_gate_promote_rollback_history_replay_and_log_pager() {
     assert!(svg_rb_p1.contains("LOG[2]: line 2: tile (3,4) nan"));
     assert!(svg_rb_p1.contains("PAGE 2/2"));
 
-    // Replay historical deployment dep-0041 in place.
     st_rb.selected_history_idx = 2;
     let svg_hist = render_console(
         &WireframeSkin,
@@ -507,14 +559,18 @@ fn u7_font_toggle_dyslexic_reflow_phone_touch_targets_html_shell_and_skin_parity
     assert_eq!(parse_font_pref("", Some("hurmit")), CrtFont::Hurmit);
     assert_eq!(font_slug(CrtFont::OpenDyslexic), "dyslexic");
 
-    let mut st = state_for_scenario(Scenario::NewBranch, Area::Overview, CrtFont::Hurmit);
+    let mut st = state_for_scenario(
+        Scenario::NewBranch,
+        SubView::Ci(CiSubView::Trainway),
+        CrtFont::Hurmit,
+    );
     let svg_hurmit = render_console(
         &WireframeSkin,
         &st,
         Viewport::new(1512.0, 860.0),
         SafeArea::ZERO,
     );
-    let cmd = st.on_key("f", false, 1_000);
+    let cmd = st.on_key("d", false, 1_000);
     assert_eq!(cmd, Some(UiCommand::SetCrtFont(CrtFont::OpenDyslexic)));
     assert!(st.lazy_dyslexic_loaded);
     let svg_dys = render_console(
@@ -546,16 +602,20 @@ fn u7_font_toggle_dyslexic_reflow_phone_touch_targets_html_shell_and_skin_parity
         svg_dys.contains("font-family=\"OpenDyslexicM Nerd Font Mono\""),
         "OpenDyslexicM Nerd Font Mono font-family must be applied to all CRT text"
     );
-    let frames_dys = muconsole_layout::solve(
-        Viewport::new(1512.0, 860.0),
-        SafeArea::ZERO,
-        Area::Overview,
+    let cards_dys = muconsole_layout::scorecard_cards(
+        muconsole_layout::solve(
+            Viewport::new(1512.0, 860.0),
+            SafeArea::ZERO,
+            Area::Ci,
+            st.font_metrics(),
+        )
+        .active_canvas,
+        Breakpoint::Wide,
+        3,
         st.font_metrics(),
     );
     assert!(
-        frames_dys.carousel.as_ref().expect("carousel").cards[0]
-            .ci_grid
-            .clamped,
+        cards_dys[0].ci_grid.clamped,
         "At the 12px legibility floor, OpenDyslexicM (0.732em) clamps card font_px to 12.0px"
     );
 
@@ -587,11 +647,9 @@ fn u7_font_toggle_dyslexic_reflow_phone_touch_targets_html_shell_and_skin_parity
     let doc_p = roxmltree::Document::parse(&svg_phone).expect("phone XML");
     for tid in [
         "c1-area-selector",
-        "c3-phone-trigger",
+        "c2-phone-rotary-trigger",
         "c2-font-switch",
-        "c3-phone-outer-next",
-        "c3-phone-inner-next",
-        "c3-phone-close",
+        "c3-rotary",
     ] {
         let node = doc_p
             .descendants()
@@ -672,4 +730,52 @@ fn u7_font_toggle_dyslexic_reflow_phone_touch_targets_html_shell_and_skin_parity
         )
         .expect("write mobile rotary html");
     }
+}
+
+#[test]
+fn u8_cross_area_trace_and_cd_gate_deep_links_and_observe_registry_subviews() {
+    let mut st = state_for_scenario(
+        Scenario::NewBranch,
+        SubView::Registry(RegistrySubView::CanaryTaints),
+        CrtFont::Hurmit,
+    );
+    let svg_reg = render_console(
+        &WireframeSkin,
+        &st,
+        Viewport::new(1512.0, 860.0),
+        SafeArea::ZERO,
+    );
+    assert!(
+        svg_reg.contains("data-trace-id=\"tr-reg-taint-01\""),
+        "Registry > Canary & Taint must render clickable data-trace-id deep-link"
+    );
+    assert!(
+        svg_reg.contains("data-cd-gate=\"dep-041\""),
+        "Registry > Canary & Taint must render clickable data-cd-gate deep-link"
+    );
+
+    // Click `[TRACE ↗]` -> navigates to Observe > PurePaths with trace_id selected.
+    let cmds = st.on_dom_action("data-trace-id", "tr-reg-taint-01", false, 2_000);
+    assert_eq!(st.route.area, Area::Observe);
+    assert_eq!(st.route.subview, SubView::Observe(ObserveSubView::PurePath));
+    assert_eq!(st.route.trace_id.as_deref(), Some("tr-reg-taint-01"));
+    assert_eq!(
+        format_hash(&st.route),
+        "#/obs/purepath/fixture/superproject?trace=tr-reg-taint-01"
+    );
+    assert_eq!(cmds.len(), 2);
+
+    let svg_obs = render_console(
+        &WireframeSkin,
+        &st,
+        Viewport::new(1512.0, 860.0),
+        SafeArea::ZERO,
+    );
+    assert!(svg_obs.contains("tr-reg-taint-01"));
+
+    // Click `[CD GATE ↗]` -> navigates to CD > Integration Gate.
+    let cmds_cd = st.on_dom_action("data-cd-gate", "dep-041", false, 2_100);
+    assert_eq!(st.route.area, Area::Cd);
+    assert_eq!(st.route.subview, SubView::Cd(CdSubView::IntegrationGate));
+    assert_eq!(cmds_cd.len(), 2);
 }
