@@ -309,6 +309,8 @@ fn classification_boundaries() {
 #[test]
 fn sweep_never_overflows() {
     // Every size between a small phone and a large desktop, both fonts.
+    let w_step = if cfg!(miri) { 447.0 } else { 37.0 };
+    let h_step = if cfg!(miri) { 323.0 } else { 23.0 };
     let mut w = 320.0;
     while w <= 2560.0 {
         let mut h = 300.0;
@@ -317,9 +319,9 @@ fn sweep_never_overflows() {
                 let f = solve(Viewport::new(w, h), SafeArea::ZERO, Area::Ci, font);
                 assert_no_overflow(&f, &format!("{w}x{h} {}", font.family));
             }
-            h += 23.0;
+            h += h_step;
         }
-        w += 37.0;
+        w += w_step;
     }
 }
 
