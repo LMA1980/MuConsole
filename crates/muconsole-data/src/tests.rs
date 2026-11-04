@@ -362,12 +362,15 @@ fn deterministic_scenario_player_aliases_stepping_and_speed_control() {
         assert!(fx.contains(&Effect::Post(DataEvent::Connection(expected_conn))));
 
         let end = sc.duration_ms();
+        let tick_step = if cfg!(miri) { 500 } else { MIN_INTERVAL_MS };
         let mut now = 0;
         while now <= end {
             let fx = eng.tick(now);
             drain_view_events(&fx, &mut mirror);
-            now += MIN_INTERVAL_MS;
+            now += tick_step;
         }
+        let fx = eng.tick(end + MIN_INTERVAL_MS);
+        drain_view_events(&fx, &mut mirror);
         assert_eq!(
             mirror.as_ref(),
             Some(&eng.store().view()),

@@ -274,7 +274,8 @@ fn mutate(r: &mut Rng, vm: &ViewModel) -> ViewModel {
 #[test]
 fn diff_then_apply_reconstructs_the_target() {
     let mut r = Rng(0x9E37_79B9_7F4A_7C15);
-    for case in 0..2_000 {
+    let cases = if cfg!(miri) { 16 } else { 2_000 };
+    for case in 0..cases {
         let old = gen_view(&mut r);
         let new = if case % 3 == 0 {
             gen_view(&mut r)
@@ -309,7 +310,8 @@ fn incremental_diffs_stay_incremental() {
 #[test]
 fn random_events_round_trip_through_the_codec() {
     let mut r = Rng(42);
-    for _ in 0..500 {
+    let iterations = if cfg!(miri) { 8 } else { 500 };
+    for _ in 0..iterations {
         let a = gen_view(&mut r);
         let b = mutate(&mut r, &a);
         for ev in [
