@@ -2,6 +2,7 @@
 //! Automated UX Validation Gate (`U1`–`U7`) for Phase 3 (`WireframeSkin`,
 //! `C1`–`C6`, `Hurmit` ↔ `OpenDyslexicM`, keyboard/ARIA parity, and skin
 //! parity between `WireframeSkin` and `AvionicsSkin`).
+#![cfg(not(miri))]
 
 use muconsole_data::engine::{Effect, Engine};
 use muconsole_data::scenario::Scenario;

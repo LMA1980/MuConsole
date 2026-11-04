@@ -152,8 +152,9 @@ mod tests {
         let mut c = Coalescer::new();
         let mut mirror = ViewModel::default();
         let mut emissions: Vec<u64> = Vec::new();
-        // The store changes every 7 ms for 2 s.
-        for (n, now) in (0..2_000_u64).step_by(7).enumerate() {
+        // The store changes every 7 ms (49 ms under Miri) for 2 s.
+        let step = if cfg!(miri) { 49 } else { 7 };
+        for (n, now) in (0..2_000_u64).step_by(step).enumerate() {
             let target = vm(u32::try_from(n % 50).unwrap_or(0));
             if let Some(ev) = c.poll(now, true, || target) {
                 emissions.push(now);
