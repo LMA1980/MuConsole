@@ -272,6 +272,7 @@ fn tab_hidden_throttles_to_heartbeats_and_resyncs_on_visible() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn offline_snapshot_watermark_and_live_recovery() {
     let mut eng = Engine::new(100);
     eng.handle(UiCommand::Configure(WorkerConfig::default()), 0);
@@ -347,6 +348,9 @@ fn deterministic_scenario_player_aliases_stepping_and_speed_control() {
 
     // Replay every canonical scenario end-to-end and verify mirror consistency.
     for sc in Scenario::ALL {
+        if cfg!(miri) && matches!(sc, Scenario::Repos40) {
+            continue;
+        }
         let mut eng = Engine::new(1);
         let mut mirror = None;
         let cfg = WorkerConfig {

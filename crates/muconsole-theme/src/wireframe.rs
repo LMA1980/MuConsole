@@ -1388,6 +1388,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn wireframe_skin_emits_zero_decorative_filters_and_matches_avionics_control_parity() {
         let wf_svg = render_sample(&WireframeSkin);
         let av_svg = render_sample(&AvionicsSkin::default());

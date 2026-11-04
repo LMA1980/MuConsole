@@ -3,6 +3,7 @@
 //! 5 Areas × 17 Sub-Views, C2 Repo/Submodule Stepper, `SubViewBar`,
 //! `Hurmit` ↔ `OpenDyslexicM` toggle, keyboard/DOM/deep-link parity,
 //! cross-area `[TRACE ↗]` / `[CD GATE ↗]` routing, and public privacy boundary).
+#![cfg(not(miri))]
 
 use muconsole_data::engine::{Effect, Engine};
 use muconsole_data::scenario::Scenario;

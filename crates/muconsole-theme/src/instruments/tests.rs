@@ -201,6 +201,7 @@ fn assert_references_resolve(doc: &roxmltree::Document<'_>) {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn full_scene_is_well_formed_and_resolvable() {
     for effects in [Effects::FULL, Effects::LITE] {
         let svg = scene(effects);
@@ -211,6 +212,7 @@ fn full_scene_is_well_formed_and_resolvable() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn output_is_deterministic() {
     assert_eq!(scene(Effects::FULL), scene(Effects::FULL));
     assert_eq!(scene(Effects::LITE), scene(Effects::LITE));
@@ -218,6 +220,7 @@ fn output_is_deterministic() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn lite_mode_drops_bloom_and_scanlines() {
     let lite = scene(Effects::LITE);
     assert!(!lite.contains("mu-phos"));
@@ -230,6 +233,7 @@ fn lite_mode_drops_bloom_and_scanlines() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn crt_text_is_escaped() {
     let svg = scene(Effects::FULL);
     assert!(svg.contains("feat/rvv-gemm &amp; &lt;main&gt;"));
@@ -255,6 +259,7 @@ fn lcd_uses_one_glyph_per_lit_cell() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn defs_cover_every_lcd_glyph() {
     let mut w = SvgWriter::new();
     write_defs(&mut w, Effects::FULL);
@@ -351,6 +356,7 @@ fn rotary_helpers() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn rotary_without_submodules() {
     let mut w = SvgWriter::new();
     rotary(
