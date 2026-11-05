@@ -6,13 +6,15 @@ Verifies:
   Check 1: GET /oauth2/start?rd=/
            - HTTP 302 Found or 303 See Other (NOT 200 OK SPA HTML).
            - Location header points to https://github.com/login/oauth/authorize.
-           - Location query parameters: client_id, redirect_uri, scope (read:user), state.
+           - Location query parameters: client_id, redirect_uri, scope (user:email read:org), state.
+           - Content-Security-Policy contains single-quoted keywords ('self', 'unsafe-inline', 'wasm-unsafe-eval').
            - Set-Cookie header issues CSRF cookie (_muconsole_oauth2_csrf or _oauth2_proxy_csrf).
   Check 2: GET /oauth2/start?rd=<encoded_invite_url>
            - Preserves redirect target in OAuth2 handshake state.
   Check 3: Root HTML asset resolution (GET /)
            - index.html must use root-absolute paths (/tokens.css, /muconsole-ui.js, /fonts/...),
              rejecting relative paths (./tokens.css) that cause 404 cascades on virtual routes.
+           - Content-Security-Policy header contains single-quoted keywords ('self', 'unsafe-inline', 'wasm-unsafe-eval').
   Check 4: Virtual route asset isolation
            - Virtual route asset requests (/oauth2/tokens.css, /oauth2/muconsole-ui.js) must NOT
              serve SPA index.html fallback.
@@ -152,11 +154,20 @@ def run_suite(host: str, port: int) -> bool:
                 chk1_details.append(f"redirect_uri verified: {redirect_uri}")
 
             scope = params.get("scope", [""])[0]
-            if "read:user" not in scope:
-                chk1_details.append(f"ERROR: scope must contain 'read:user', got '{scope}'")
+            has_user_email = "user:email" in scope or "user%3Aemail" in location
+            has_read_org = "read:org" in scope or "read%3Aorg" in location
+            if not has_user_email or not has_read_org:
+                missing = []
+                if not has_user_email:
+                    missing.append("user:email (user%3Aemail)")
+                if not has_read_org:
+                    missing.append("read:org (read%3Aorg)")
+                chk1_details.append(
+                    f"ERROR: scope must contain BOTH 'user:email' and 'read:org' (required by oauth2-proxy GitHub provider), missing: {missing}, got '{scope}'"
+                )
                 chk1_passed = False
             else:
-                chk1_details.append(f"scope verified: '{scope}'")
+                chk1_details.append(f"scope verified: '{scope}' (contains user:email and read:org)")
 
             state = params.get("state", [""])[0]
             if not state:
@@ -187,6 +198,23 @@ def run_suite(host: str, port: int) -> bool:
             chk1_passed = False
         else:
             chk1_details.append("CSRF state cookie successfully issued.")
+
+        # Verify Content-Security-Policy header
+        csp = headers.get("content-security-policy", "")
+        chk1_details.append(f"Content-Security-Policy: {csp}")
+        if not csp:
+            chk1_details.append("ERROR: Missing Content-Security-Policy response header on /oauth2/start!")
+            chk1_passed = False
+        else:
+            required_csp_keywords = ["'self'", "'unsafe-inline'", "'wasm-unsafe-eval'"]
+            missing_csp = [k for k in required_csp_keywords if k not in csp]
+            if missing_csp:
+                chk1_details.append(
+                    f"ERROR: Content-Security-Policy missing single-quoted keyword(s): {missing_csp}! Unquoted keywords (e.g. self) are treated as hostnames, not CSP keywords. Got: '{csp}'"
+                )
+                chk1_passed = False
+            else:
+                chk1_details.append("Content-Security-Policy keywords properly single-quoted ('self', 'unsafe-inline', 'wasm-unsafe-eval').")
 
     except Exception as e:
         chk1_details.append(f"EXCEPTION: {e}")
@@ -261,6 +289,23 @@ def run_suite(host: str, port: int) -> bool:
                 chk3_passed = False
             else:
                 chk3_details.append("PASSED: All asset links and imports in index.html use root-absolute paths.")
+
+            # Verify Content-Security-Policy on root HTML
+            csp_root = headers.get("content-security-policy", "")
+            chk3_details.append(f"Root Content-Security-Policy: {csp_root}")
+            if not csp_root:
+                chk3_details.append("ERROR: Root GET / missing Content-Security-Policy response header (check Nginx location / add_header inheritance)!")
+                chk3_passed = False
+            else:
+                required_csp_keywords = ["'self'", "'unsafe-inline'", "'wasm-unsafe-eval'"]
+                missing_csp_root = [k for k in required_csp_keywords if k not in csp_root]
+                if missing_csp_root:
+                    chk3_details.append(
+                        f"ERROR: Root Content-Security-Policy missing single-quoted keyword(s): {missing_csp_root}! Got: '{csp_root}'"
+                    )
+                    chk3_passed = False
+                else:
+                    chk3_details.append("Root Content-Security-Policy keywords properly single-quoted ('self', 'unsafe-inline', 'wasm-unsafe-eval').")
     except Exception as e:
         chk3_details.append(f"EXCEPTION: {e}")
         chk3_passed = False
