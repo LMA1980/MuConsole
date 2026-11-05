@@ -19,7 +19,7 @@ use muconsole_theme::skin::{
     Lamp, Panel, Readout, Rotary, Screen, ScreenRow, ScreenTrack, Selector, SelectorOption,
     SemanticTone, SignalGlyph, Skin,
 };
-use muconsole_theme::svg::{PathData, SvgWriter};
+use muconsole_theme::svg::{escape_into, PathData, SvgWriter};
 
 use crate::router::{area_label, breadcrumb_segments};
 use crate::state::{font_slug, ConsoleState};
@@ -3341,6 +3341,13 @@ fn render_fleet_sandbox_profiles(
     );
 }
 
+/// Helper to HTML-escape a string slice using [`escape_into`].
+fn escape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    escape_into(&mut out, s);
+    out
+}
+
 /// Render the accessible HTML shell wrapping `svg` with:
 /// - Skip-to-dashboard link (`#muconsole-dashboard`);
 /// - Operator authentication link (`#muconsole-auth-link`);
@@ -3374,21 +3381,26 @@ pub fn render_html_shell(svg: &str, state: &ConsoleState) -> String {
             format!("@{github_login} · OPERATOR"),
         ),
     };
+    let escaped_filter_query = escape_html(&state.filter_query);
+    let escaped_aria_polite = escape_html(&state.aria_polite);
+    let escaped_aria_assertive = escape_html(&state.aria_assertive);
+    let escaped_auth_href = escape_html(auth_href);
+    let escaped_auth_label = escape_html(&auth_label);
+
     format!(
-        "<div id=\"muconsole-shell\" data-crt-font=\"{font_attr}\" data-lazy-dyslexic=\"{}\" data-area=\"{}\" data-subview=\"{}\" data-auth-state=\"{auth_slug}\">\
+        "<div id=\"muconsole-shell\" data-crt-font=\"{font_attr}\" data-lazy-dyslexic=\"{lazy_dyslexic}\" data-area=\"{area}\" data-subview=\"{subview}\" data-auth-state=\"{auth_slug}\">\
          <style>{dyslexic_face}#muconsole-filter{{font-size:16px;}}</style>\
+         <header id=\"muconsole-header\" role=\"banner\">\
          <a href=\"#muconsole-dashboard\" class=\"skip-link\">Skip to dashboard</a>\
-         <a id=\"muconsole-auth-link\" href=\"{auth_href}\" data-auth-state=\"{auth_slug}\">{auth_label}</a>\
-         <div id=\"muconsole-aria-polite\" role=\"status\" aria-live=\"polite\" aria-atomic=\"true\">{}</div>\
-         <div id=\"muconsole-aria-assertive\" role=\"alert\" aria-live=\"assertive\" aria-atomic=\"true\">{}</div>\
-         <input id=\"muconsole-filter\" type=\"search\" aria-label=\"Type-ahead repository filter\" style=\"font-size:16px\" value=\"{}\"/>\
-         <main id=\"muconsole-dashboard\" role=\"main\" aria-label=\"MuConsole Unified CI/CD Dashboard\">{svg}</main>\
+         <input id=\"muconsole-filter\" type=\"search\" placeholder=\"Filter repositories...\" aria-label=\"Type-ahead repository filter\" style=\"font-size:16px\" value=\"{escaped_filter_query}\"/>\
+         <div id=\"muconsole-aria-polite\" role=\"status\" aria-live=\"polite\" aria-atomic=\"true\">{escaped_aria_polite}</div>\
+         <div id=\"muconsole-aria-assertive\" role=\"alert\" aria-live=\"assertive\" aria-atomic=\"true\">{escaped_aria_assertive}</div>\
+         <a id=\"muconsole-auth-link\" href=\"{escaped_auth_href}\" data-auth-state=\"{auth_slug}\">{escaped_auth_label}</a>\
+         </header>\
+         <main id=\"muconsole-dashboard\" role=\"main\" aria-label=\"MuConsole Unified CI/CD Dashboard\" tabindex=\"-1\">{svg}</main>\
          </div>",
-        state.lazy_dyslexic_loaded,
-        area_label(state.route.area),
-        state.route.subview.slug(),
-        state.aria_polite,
-        state.aria_assertive,
-        state.filter_query,
+        lazy_dyslexic = state.lazy_dyslexic_loaded,
+        area = area_label(state.route.area),
+        subview = state.route.subview.slug(),
     )
 }
