@@ -150,7 +150,11 @@ async fn fetch_json(kind: FetchKind, url: String) {
     let result = async {
         let req = match &kind {
             FetchKind::AuthRedeem(token) => {
-                let payload = serde_json::json!({ "token": token }).to_string();
+                let payload = serde_json::json!({
+                    "token": token,
+                    "invite_token": token,
+                })
+                .to_string();
                 post_json_request(&url, &payload)
             }
             _ => request(&url, "application/json", None),
