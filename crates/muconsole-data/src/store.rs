@@ -9,15 +9,21 @@
 use std::collections::BTreeMap;
 
 use muconsole_protocol::dto::{
-    AuthSessionDto, BranchCreatedDto, BranchDeletedDto, DeploymentDto, GateDto, ItProgressDto,
-    JobStageChangedDto, LeaseExpiredDto, NodeMembershipChangedDto, PrStateChangedDto, PromotedDto,
-    RepoDto, RepoSummaryDto, RolledBackDto, TaintedDto, TopologyDto,
+    AuthSessionDto, BranchCreatedDto, BranchDeletedDto, CanaryBundleDto, CasStatusDto,
+    DeploymentDto, GateDto, ItProgressDto, JobStageChangedDto, LeaseExpiredDto, MetricSeriesDto,
+    NodeMembershipChangedDto, OtelLogDto, PackageDto, PrStateChangedDto, ProblemDto, PromotedDto,
+    RepoDto, RepoSummaryDto, RolledBackDto, SmartscapeDto, StoreStatusDto, TaintedDto, TopologyDto,
+    TraceDto,
 };
 use muconsole_protocol::{
-    AreaBadges, AuthState, Branch, CdScore, DataSource, DeploymentGate, DeploymentSummary,
-    FabricNode, FadeReason, GateOutcome, GateTest, ParentRef, PrState, RepoId, RepoScore,
-    RepoStatus, RepoTopology, RollbackReason, Selection, SidingPhase, StageState, Station,
-    SubmoduleRef, Train, ViewModel,
+    sanitize_public_log, AreaBadges, AuthState, Branch, CanaryBundle, CanaryBundleState, CasHealth,
+    CdLease, CdScore, DataSource, DataStoreHealth, DeploymentGate, DeploymentSummary, FabricNode,
+    FadeReason, GateOutcome, GateTest, HardwareMetricSeries, LogSeverity, ObserveView,
+    OtelLogEntry, PackageEcosystem, ParentRef, PrState, ProblemCategory, PurePathTrace,
+    RegistryPackage, RegistryView, RepoId, RepoScore, RepoStatus, RepoTopology, RollbackReason,
+    SandboxProfileSummary, Selection, SidingPhase, SloProblem, Slot, SmartscapeEdge,
+    SmartscapeLayer, SmartscapeNode, StageState, Station, SubmoduleRef, TraceSpan, Train,
+    ViewModel,
 };
 
 /// A merged or deleted siding is removed this long after it starts fading.
@@ -35,6 +41,18 @@ pub enum Input {
         list: Vec<DeploymentDto>,
     },
     Gate(GateDto),
+    Leases(Vec<CdLease>),
+    Sandboxes(Vec<SandboxProfileSummary>),
+    RegPackages(Vec<PackageDto>),
+    RegCanaries(Vec<CanaryBundleDto>),
+    RegCasStatus(CasStatusDto),
+    ObsSmartscape(SmartscapeDto),
+    ObsProblems(Vec<ProblemDto>),
+    ObsTraces(Vec<TraceDto>),
+    ObsTraceDetail(TraceDto),
+    ObsLogs(Vec<OtelLogDto>),
+    ObsMetrics(Vec<MetricSeriesDto>),
+    ObsStoreStatus(StoreStatusDto),
     BranchCreated(BranchCreatedDto),
     BranchDeleted(BranchDeletedDto),
     PrStateChanged(PrStateChangedDto),
@@ -71,6 +89,10 @@ pub struct Store {
     history: BTreeMap<RepoId, Vec<DeploymentSummary>>,
     latest: BTreeMap<RepoId, String>,
     nodes: BTreeMap<String, FabricNode>,
+    leases: Vec<CdLease>,
+    sandboxes: Vec<SandboxProfileSummary>,
+    registry: RegistryView,
+    observe: ObserveView,
     selection: Option<Selection>,
     auth: AuthState,
     /// Offline snapshot shown until live data arrives.
@@ -83,7 +105,6 @@ fn pct_to_bp(pct: f64) -> u32 {
     if pct.is_nan() {
         return 0;
     }
-    // Clamped to 0..=10_000 first, so the cast cannot truncate.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let bp = (pct * 100.0).round().clamp(0.0, 10_000.0) as u32;
     bp
@@ -110,6 +131,620 @@ fn upsert_sorted<T, K: Ord>(v: &mut Vec<T>, item: T, key: impl Fn(&T) -> K) {
     match v.binary_search_by(|x| key(x).cmp(&key(&item))) {
         Ok(i) => v[i] = item,
         Err(i) => v.insert(i, item),
+    }
+}
+
+fn default_leases() -> Vec<CdLease> {
+    vec![
+        CdLease {
+            lease_id: "lse-042".into(),
+            deployment_id: "dep-042".into(),
+            target_node: "worker-riscv64".into(),
+            service: "muconde-agent".into(),
+            artifact_digest: "sha256:9f82c01a334e".into(),
+            active_slot: Slot::A,
+            candidate_slot: Slot::B,
+            ttl_remaining_ms: 42_000,
+            promoted: false,
+        },
+        CdLease {
+            lease_id: "lse-041".into(),
+            deployment_id: "dep-041".into(),
+            target_node: "node-a".into(),
+            service: "muregist".into(),
+            artifact_digest: "sha256:deadbeef9012".into(),
+            active_slot: Slot::A,
+            candidate_slot: Slot::B,
+            ttl_remaining_ms: 118_000,
+            promoted: false,
+        },
+        CdLease {
+            lease_id: "lse-040".into(),
+            deployment_id: "dep-040".into(),
+            target_node: "node-b".into(),
+            service: "muobserve".into(),
+            artifact_digest: "sha256:71c4a08823f1".into(),
+            active_slot: Slot::B,
+            candidate_slot: Slot::B,
+            ttl_remaining_ms: 85_000,
+            promoted: true,
+        },
+    ]
+}
+
+fn default_sandboxes() -> Vec<SandboxProfileSummary> {
+    vec![
+        SandboxProfileSummary {
+            profile_name: "KernelSandbox::ci-default".into(),
+            backend: "LandlockV3+cgroupv2+seccomp".into(),
+            max_pids: 256,
+            max_slots: 1,
+            thread_budget: 6,
+            hardware_target: "worker-riscv64 (X100/A100)".into(),
+        },
+        SandboxProfileSummary {
+            profile_name: "KernelSandbox::k3-a100-bench".into(),
+            backend: "LandlockV3+set_ai_thread(0xFF00)".into(),
+            max_pids: 256,
+            max_slots: 1,
+            thread_budget: 6,
+            hardware_target: "SpacemiT K3 Cluster 1 A100 (VLEN=1024)".into(),
+        },
+        SandboxProfileSummary {
+            profile_name: "HypervisorSandbox::cd-it-gate".into(),
+            backend: "KVM(/dev/kvm)+virtio-vsock".into(),
+            max_pids: 256,
+            max_slots: 1,
+            thread_budget: 2,
+            hardware_target: "node-a / node-b (VT-x / KVM)".into(),
+        },
+    ]
+}
+
+fn default_registry() -> RegistryView {
+    RegistryView {
+        packages: vec![
+            RegistryPackage {
+                ecosystem: PackageEcosystem::Cargo,
+                name: "muisolation".into(),
+                latest_version: "0.4.2".into(),
+                versions_count: 3,
+                sha256_prefix: "4a8b91e0c21f".into(),
+                deps_count: 4,
+                yanked: false,
+                tainted: false,
+                taint_reason: None,
+                versions: vec!["0.4.2".into(), "0.4.1".into(), "0.4.0".into()],
+            },
+            RegistryPackage {
+                ecosystem: PackageEcosystem::Cargo,
+                name: "actionrunner-ipc".into(),
+                latest_version: "0.3.1".into(),
+                versions_count: 2,
+                sha256_prefix: "7d31f09aa812".into(),
+                deps_count: 3,
+                yanked: false,
+                tainted: false,
+                taint_reason: None,
+                versions: vec!["0.3.1".into(), "0.3.0".into()],
+            },
+            RegistryPackage {
+                ecosystem: PackageEcosystem::Cargo,
+                name: "muconde-ipc".into(),
+                latest_version: "0.3.0".into(),
+                versions_count: 2,
+                sha256_prefix: "9c20e41b7734".into(),
+                deps_count: 5,
+                yanked: false,
+                tainted: false,
+                taint_reason: None,
+                versions: vec!["0.3.0".into(), "0.2.9".into()],
+            },
+            RegistryPackage {
+                ecosystem: PackageEcosystem::Cargo,
+                name: "k3-kernels-rvv".into(),
+                latest_version: "0.2.4".into(),
+                versions_count: 3,
+                sha256_prefix: "e510ab8819c4".into(),
+                deps_count: 2,
+                yanked: false,
+                tainted: true,
+                taint_reason: Some("0.2.3-tainted rolled back on CD gate".into()),
+                versions: vec!["0.2.4".into(), "0.2.3-tainted".into(), "0.2.2".into()],
+            },
+            RegistryPackage {
+                ecosystem: PackageEcosystem::NuGet,
+                name: "JeroMu.Telemetry.Bridge".into(),
+                latest_version: "1.2.0".into(),
+                versions_count: 2,
+                sha256_prefix: "b8120f44901a".into(),
+                deps_count: 6,
+                yanked: false,
+                tainted: false,
+                taint_reason: None,
+                versions: vec!["1.2.0".into(), "1.1.0".into()],
+            },
+            RegistryPackage {
+                ecosystem: PackageEcosystem::Maven,
+                name: "io.jeromu:muobserve-otlp-exporter".into(),
+                latest_version: "0.9.1".into(),
+                versions_count: 2,
+                sha256_prefix: "c1093e77a12b".into(),
+                deps_count: 8,
+                yanked: false,
+                tainted: false,
+                taint_reason: None,
+                versions: vec!["0.9.1".into(), "0.9.0".into()],
+            },
+        ],
+        canaries: vec![
+            CanaryBundle {
+                bundle_id: "cny-042".into(),
+                repo: RepoId::new("LMA1980", "MuConDe-agent"),
+                service: "muconde-agent".into(),
+                artifact_digest: "sha256:9f82c01a334e".into(),
+                state: CanaryBundleState::Promoted,
+                taint_reason: None,
+                deployment_id: "dep-042".into(),
+                trace_id: "tr-cd-0042".into(),
+            },
+            CanaryBundle {
+                bundle_id: "cny-041".into(),
+                repo: RepoId::new("LMA1980", "MuRegist"),
+                service: "muregist".into(),
+                artifact_digest: "sha256:deadbeef9012".into(),
+                state: CanaryBundleState::Tainted,
+                taint_reason: Some("Critical IT regression in it_smoke_cas_verify".into()),
+                deployment_id: "dep-041".into(),
+                trace_id: "tr-reg-taint-01".into(),
+            },
+            CanaryBundle {
+                bundle_id: "cny-043".into(),
+                repo: RepoId::new("LMA1980", "MuConsole"),
+                service: "muconsole".into(),
+                artifact_digest: "sha256:71c4a08823f1".into(),
+                state: CanaryBundleState::Candidate,
+                taint_reason: None,
+                deployment_id: "dep-043".into(),
+                trace_id: "tr-ci-1234".into(),
+            },
+        ],
+        cas: CasHealth {
+            blob_count: 14_820,
+            dedup_bytes: 3_420_000_000,
+            raw_bytes: 8_420_000_000,
+            dedup_ratio_bp: 246,
+            gc_watermark_pct: 72,
+            last_scrub_epoch_ms: 1_700_000_500,
+            corrupt_blobs: 0,
+        },
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+fn default_observe() -> ObserveView {
+    ObserveView {
+        smartscape_nodes: vec![
+            SmartscapeNode {
+                id: "svc:actionrunner-controller".into(),
+                label: "actionrunner-controller".into(),
+                layer: SmartscapeLayer::Service,
+                req_per_sec_bp: 4_250,
+                error_rate_bp: 0,
+                p95_ms: 18,
+                healthy: true,
+            },
+            SmartscapeNode {
+                id: "svc:muregist".into(),
+                label: "muregist".into(),
+                layer: SmartscapeLayer::Service,
+                req_per_sec_bp: 8_900,
+                error_rate_bp: 120,
+                p95_ms: 11,
+                healthy: true,
+            },
+            SmartscapeNode {
+                id: "svc:muconde-controller".into(),
+                label: "muconde-controller".into(),
+                layer: SmartscapeLayer::Service,
+                req_per_sec_bp: 1_850,
+                error_rate_bp: 0,
+                p95_ms: 14,
+                healthy: true,
+            },
+            SmartscapeNode {
+                id: "svc:muobserve".into(),
+                label: "muobserve".into(),
+                layer: SmartscapeLayer::Service,
+                req_per_sec_bp: 12_400,
+                error_rate_bp: 0,
+                p95_ms: 24,
+                healthy: true,
+            },
+            SmartscapeNode {
+                id: "proc:actionrunner-rs@worker-riscv64".into(),
+                label: "actionrunner-rs (K3)".into(),
+                layer: SmartscapeLayer::Process,
+                req_per_sec_bp: 2_100,
+                error_rate_bp: 0,
+                p95_ms: 22,
+                healthy: true,
+            },
+            SmartscapeNode {
+                id: "proc:muconde-agent@worker-riscv64".into(),
+                label: "muconde-agent (K3)".into(),
+                layer: SmartscapeLayer::Process,
+                req_per_sec_bp: 950,
+                error_rate_bp: 0,
+                p95_ms: 9,
+                healthy: true,
+            },
+            SmartscapeNode {
+                id: "proc:muregist-daemon@node-a".into(),
+                label: "muregist-daemon".into(),
+                layer: SmartscapeLayer::Process,
+                req_per_sec_bp: 8_900,
+                error_rate_bp: 120,
+                p95_ms: 11,
+                healthy: true,
+            },
+            SmartscapeNode {
+                id: "host:node-a".into(),
+                label: "node-a (192.168.###.101)".into(),
+                layer: SmartscapeLayer::Host,
+                req_per_sec_bp: 9_400,
+                error_rate_bp: 0,
+                p95_ms: 6,
+                healthy: true,
+            },
+            SmartscapeNode {
+                id: "host:node-b".into(),
+                label: "node-b (192.168.###.102)".into(),
+                layer: SmartscapeLayer::Host,
+                req_per_sec_bp: 6_200,
+                error_rate_bp: 0,
+                p95_ms: 7,
+                healthy: true,
+            },
+            SmartscapeNode {
+                id: "host:worker-riscv64".into(),
+                label: "worker-riscv64 (192.168.###.117)".into(),
+                layer: SmartscapeLayer::Host,
+                req_per_sec_bp: 3_050,
+                error_rate_bp: 0,
+                p95_ms: 8,
+                healthy: true,
+            },
+        ],
+        smartscape_edges: vec![
+            SmartscapeEdge {
+                from_id: "svc:actionrunner-controller".into(),
+                to_id: "proc:actionrunner-rs@worker-riscv64".into(),
+                protocol: "mTLS/gRPC".into(),
+                call_rate_rps: 42,
+                error_rate_bp: 0,
+                p95_ms: 18,
+            },
+            SmartscapeEdge {
+                from_id: "svc:muregist".into(),
+                to_id: "proc:muregist-daemon@node-a".into(),
+                protocol: "mTLS/HTTPS".into(),
+                call_rate_rps: 89,
+                error_rate_bp: 120,
+                p95_ms: 11,
+            },
+            SmartscapeEdge {
+                from_id: "svc:muconde-controller".into(),
+                to_id: "proc:muconde-agent@worker-riscv64".into(),
+                protocol: "mTLS/Lease".into(),
+                call_rate_rps: 18,
+                error_rate_bp: 0,
+                p95_ms: 14,
+            },
+            SmartscapeEdge {
+                from_id: "proc:actionrunner-rs@worker-riscv64".into(),
+                to_id: "host:worker-riscv64".into(),
+                protocol: "KernelSandbox".into(),
+                call_rate_rps: 21,
+                error_rate_bp: 0,
+                p95_ms: 4,
+            },
+            SmartscapeEdge {
+                from_id: "proc:muconde-agent@worker-riscv64".into(),
+                to_id: "host:worker-riscv64".into(),
+                protocol: "systemd-slot".into(),
+                call_rate_rps: 10,
+                error_rate_bp: 0,
+                p95_ms: 3,
+            },
+            SmartscapeEdge {
+                from_id: "proc:muregist-daemon@node-a".into(),
+                to_id: "host:node-a".into(),
+                protocol: "CAS-fs".into(),
+                call_rate_rps: 89,
+                error_rate_bp: 0,
+                p95_ms: 5,
+            },
+        ],
+        traces: vec![
+            PurePathTrace {
+                trace_id: "tr-ci-1234".into(),
+                root_service: "actionrunner-controller".into(),
+                root_operation: "ci.pipeline.verify (job #1234)".into(),
+                domain: "CI".into(),
+                duration_ms: 4_820,
+                error: false,
+                slow_p99: false,
+                started_epoch_ms: 1_700_000_100,
+                spans: vec![
+                    TraceSpan {
+                        span_id: "sp-ci-01".into(),
+                        parent_span_id: None,
+                        service: "actionrunner-controller".into(),
+                        operation: "webhook.dispatch".into(),
+                        start_offset_us: 0,
+                        duration_us: 120_000,
+                        self_time_us: 45_000,
+                        critical_path: true,
+                        error: false,
+                        hardware_class: "node-a (x86_64)".into(),
+                    },
+                    TraceSpan {
+                        span_id: "sp-ci-02".into(),
+                        parent_span_id: Some("sp-ci-01".into()),
+                        service: "actionrunner-rs".into(),
+                        operation: "muisolation.sandbox.exec (cargo test + miri)".into(),
+                        start_offset_us: 120_000,
+                        duration_us: 4_410_000,
+                        self_time_us: 4_120_000,
+                        critical_path: true,
+                        error: false,
+                        hardware_class: "worker-riscv64 (K3 X100)".into(),
+                    },
+                    TraceSpan {
+                        span_id: "sp-ci-03".into(),
+                        parent_span_id: Some("sp-ci-02".into()),
+                        service: "muregist".into(),
+                        operation: "cas.upload_canary_bundle".into(),
+                        start_offset_us: 4_530_000,
+                        duration_us: 290_000,
+                        self_time_us: 290_000,
+                        critical_path: true,
+                        error: false,
+                        hardware_class: "node-a (CAS)".into(),
+                    },
+                ],
+            },
+            PurePathTrace {
+                trace_id: "tr-reg-taint-01".into(),
+                root_service: "muconde-controller".into(),
+                root_operation: "cd.gate.verify_canary (dep-041)".into(),
+                domain: "REGISTRY".into(),
+                duration_ms: 3_150,
+                error: true,
+                slow_p99: true,
+                started_epoch_ms: 1_700_000_200,
+                spans: vec![
+                    TraceSpan {
+                        span_id: "sp-taint-01".into(),
+                        parent_span_id: None,
+                        service: "muconde-controller".into(),
+                        operation: "slot.stage_b (dep-041)".into(),
+                        start_offset_us: 0,
+                        duration_us: 310_000,
+                        self_time_us: 110_000,
+                        critical_path: true,
+                        error: false,
+                        hardware_class: "node-a (x86_64)".into(),
+                    },
+                    TraceSpan {
+                        span_id: "sp-taint-02".into(),
+                        parent_span_id: Some("sp-taint-01".into()),
+                        service: "muconde-agent".into(),
+                        operation: "it.run_critical (it_smoke_cas_verify)".into(),
+                        start_offset_us: 310_000,
+                        duration_us: 2_420_000,
+                        self_time_us: 2_420_000,
+                        critical_path: true,
+                        error: true,
+                        hardware_class: "worker-riscv64 (K3 X100)".into(),
+                    },
+                    TraceSpan {
+                        span_id: "sp-taint-03".into(),
+                        parent_span_id: Some("sp-taint-01".into()),
+                        service: "muregist".into(),
+                        operation: "canary.mark_tainted (cny-041)".into(),
+                        start_offset_us: 2_730_000,
+                        duration_us: 420_000,
+                        self_time_us: 420_000,
+                        critical_path: true,
+                        error: true,
+                        hardware_class: "node-a (CAS)".into(),
+                    },
+                ],
+            },
+            PurePathTrace {
+                trace_id: "tr-cd-0042".into(),
+                root_service: "muconde-controller".into(),
+                root_operation: "cd.promote_slot_b (dep-042)".into(),
+                domain: "CD".into(),
+                duration_ms: 1_940,
+                error: false,
+                slow_p99: false,
+                started_epoch_ms: 1_700_000_300,
+                spans: vec![
+                    TraceSpan {
+                        span_id: "sp-cd-01".into(),
+                        parent_span_id: None,
+                        service: "muconde-controller".into(),
+                        operation: "lease.acquire (lse-042)".into(),
+                        start_offset_us: 0,
+                        duration_us: 180_000,
+                        self_time_us: 180_000,
+                        critical_path: true,
+                        error: false,
+                        hardware_class: "worker-riscv64 (192.168.###.117)".into(),
+                    },
+                    TraceSpan {
+                        span_id: "sp-cd-02".into(),
+                        parent_span_id: Some("sp-cd-01".into()),
+                        service: "muconde-agent".into(),
+                        operation: "it.suite.all_critical".into(),
+                        start_offset_us: 180_000,
+                        duration_us: 1_760_000,
+                        self_time_us: 1_760_000,
+                        critical_path: true,
+                        error: false,
+                        hardware_class: "worker-riscv64 (K3 A100)".into(),
+                    },
+                ],
+            },
+            PurePathTrace {
+                trace_id: "tr-obs-p99-07".into(),
+                root_service: "muobserve".into(),
+                root_operation: "bench.k3.cluster_stratified".into(),
+                domain: "CI".into(),
+                duration_ms: 6_410,
+                error: false,
+                slow_p99: true,
+                started_epoch_ms: 1_700_000_400,
+                spans: vec![
+                    TraceSpan {
+                        span_id: "sp-obs-01".into(),
+                        parent_span_id: None,
+                        service: "muobserve".into(),
+                        operation: "k3.x100.scalar_rvv256_probe".into(),
+                        start_offset_us: 0,
+                        duration_us: 2_110_000,
+                        self_time_us: 2_110_000,
+                        critical_path: true,
+                        error: false,
+                        hardware_class: "Cluster 0 X100 (0x00FF) VLEN=256".into(),
+                    },
+                    TraceSpan {
+                        span_id: "sp-obs-02".into(),
+                        parent_span_id: Some("sp-obs-01".into()),
+                        service: "muobserve".into(),
+                        operation: "k3.a100.xsmtvdotii_matrix_probe".into(),
+                        start_offset_us: 2_110_000,
+                        duration_us: 4_300_000,
+                        self_time_us: 4_300_000,
+                        critical_path: true,
+                        error: false,
+                        hardware_class: "Cluster 1 A100 (0xFF00) VLEN=1024 smt.vmadot".into(),
+                    },
+                ],
+            },
+        ],
+        problems: vec![
+            SloProblem {
+                problem_id: "PRB-104".into(),
+                title: "Canary Taint & Automatic Slot Rollback on muregist".into(),
+                category: ProblemCategory::CanaryTaint,
+                severity: "ERROR".into(),
+                burn_rate_bp: 420,
+                impacted_entity: "svc:muregist (cny-041 / dep-041)".into(),
+                root_cause_trace_id: "tr-reg-taint-01".into(),
+                active: true,
+            },
+            SloProblem {
+                problem_id: "PRB-101".into(),
+                title: "SpacemiT K3 Cluster 0 vs Cluster 1 Matmul Tail Variance".into(),
+                category: ProblemCategory::LatencyRegression,
+                severity: "WARN".into(),
+                burn_rate_bp: 185,
+                impacted_entity: "k3-kernels-rvv (X100 VLEN=256 vs A100 VLEN=1024)".into(),
+                root_cause_trace_id: "tr-obs-p99-07".into(),
+                active: true,
+            },
+        ],
+        logs: vec![
+            OtelLogEntry {
+                timestamp_ms: 1_700_000_510,
+                severity: LogSeverity::Error,
+                service: "muconde-agent".into(),
+                span_id: Some("sp-taint-02".into()),
+                trace_id: "tr-reg-taint-01".into(),
+                message: sanitize_public_log(
+                    "IT gate failure on 192.168.1.117 (/var/lib/muconde/slots/b/verify.rs): digest mismatch -> taint cny-041",
+                ),
+            },
+            OtelLogEntry {
+                timestamp_ms: 1_700_000_520,
+                severity: LogSeverity::Warn,
+                service: "muobserve".into(),
+                span_id: Some("sp-obs-02".into()),
+                trace_id: "tr-obs-p99-07".into(),
+                message: sanitize_public_log(
+                    "K3 benchmark delta on worker-riscv64 (192.168.1.117): X100 VLEN=256 p99=2110ms vs A100 VLEN=1024",
+                ),
+            },
+            OtelLogEntry {
+                timestamp_ms: 1_700_000_530,
+                severity: LogSeverity::Info,
+                service: "actionrunner-rs".into(),
+                span_id: Some("sp-ci-02".into()),
+                trace_id: "tr-ci-1234".into(),
+                message: sanitize_public_log(
+                    "Completed 7/7 verification stages in /var/lib/action-runner/work/MuConsole on worker-riscv64",
+                ),
+            },
+            OtelLogEntry {
+                timestamp_ms: 1_700_000_540,
+                severity: LogSeverity::Info,
+                service: "muconde-controller".into(),
+                span_id: Some("sp-cd-02".into()),
+                trace_id: "tr-cd-0042".into(),
+                message: sanitize_public_log(
+                    "Promoted deployment dep-042 to active slot B on 192.168.1.117",
+                ),
+            },
+        ],
+        metrics: vec![
+            HardwareMetricSeries {
+                service: "k3-kernels-rvv".into(),
+                hardware_class: "Cluster 1 A100 (cores 8-15, VLEN=1024, XSMTVDotII)".into(),
+                rps: 118,
+                error_rate_bp: 0,
+                p50_ms: 11,
+                p95_ms: 14,
+                p99_ms: 17,
+                exemplar_trace_id: "tr-obs-p99-07".into(),
+                samples: vec![1140, 1158, 1172, 1165, 1180, 1184, 1179, 1188],
+            },
+            HardwareMetricSeries {
+                service: "k3-kernels-rvv".into(),
+                hardware_class: "Cluster 0 X100 (cores 0-7, VLEN=256, Out-of-Order)".into(),
+                rps: 94,
+                error_rate_bp: 0,
+                p50_ms: 19,
+                p95_ms: 23,
+                p99_ms: 28,
+                exemplar_trace_id: "tr-obs-p99-07".into(),
+                samples: vec![138, 141, 140, 143, 142, 144, 141, 142],
+            },
+            HardwareMetricSeries {
+                service: "actionrunner-rs".into(),
+                hardware_class: "Fabric CI Stage Latency (max_slots=1, threads=6)".into(),
+                rps: 42,
+                error_rate_bp: 0,
+                p50_ms: 46,
+                p95_ms: 48,
+                p99_ms: 49,
+                exemplar_trace_id: "tr-ci-1234".into(),
+                samples: vec![462, 451, 489, 472, 482, 468, 459, 471],
+            },
+        ],
+        store: DataStoreHealth {
+            hot_duckdb_rows: 1_482_900,
+            hot_duckdb_bytes: 312_400_000,
+            cold_parquet_partitions: 428,
+            cold_parquet_rows: 48_920_000,
+            cold_parquet_bytes: 4_890_000_000,
+            zstd_compression_bp: 385,
+            retention_days: 90,
+            oldest_watermark_iso: "2026-08-05T00:00:00Z".into(),
+        },
     }
 }
 
@@ -207,7 +842,23 @@ impl Store {
         }
     }
 
+    fn ensure_aux_defaults(&mut self) {
+        if self.leases.is_empty() {
+            self.leases = default_leases();
+        }
+        if self.sandboxes.is_empty() {
+            self.sandboxes = default_sandboxes();
+        }
+        if self.registry.packages.is_empty() {
+            self.registry = default_registry();
+        }
+        if self.observe.smartscape_nodes.is_empty() {
+            self.observe = default_observe();
+        }
+    }
+
     /// Apply one input. Returns whether anything changed.
+    #[allow(clippy::too_many_lines)]
     pub fn apply(&mut self, input: Input, now_ms: u64) -> bool {
         let changed = match input {
             Input::Repos(list) => self.repos_loaded(list),
@@ -215,6 +866,196 @@ impl Store {
             Input::Topology(t) => self.topology(t),
             Input::Deployments { repo, list } => self.deployments(&repo, &list),
             Input::Gate(g) => self.gate(g),
+            Input::Leases(list) => {
+                self.loaded = true;
+                self.ensure_aux_defaults();
+                self.leases = list
+                    .into_iter()
+                    .map(|mut l| {
+                        l.target_node = sanitize_public_log(&l.target_node);
+                        l
+                    })
+                    .collect();
+                true
+            }
+            Input::Sandboxes(list) => {
+                self.loaded = true;
+                self.ensure_aux_defaults();
+                self.sandboxes = list;
+                true
+            }
+            Input::RegPackages(list) => {
+                self.loaded = true;
+                self.ensure_aux_defaults();
+                self.registry.packages = list
+                    .into_iter()
+                    .map(|d| RegistryPackage {
+                        ecosystem: d.ecosystem,
+                        name: d.name,
+                        latest_version: d.latest_version,
+                        versions_count: d.versions_count,
+                        sha256_prefix: d.sha256_prefix,
+                        deps_count: d.deps_count,
+                        yanked: d.yanked,
+                        tainted: d.tainted,
+                        taint_reason: d.taint_reason.map(|r| sanitize_public_log(&r)),
+                        versions: d.versions,
+                    })
+                    .collect();
+                true
+            }
+            Input::RegCanaries(list) => {
+                self.loaded = true;
+                self.ensure_aux_defaults();
+                self.registry.canaries = list
+                    .into_iter()
+                    .map(|d| CanaryBundle {
+                        bundle_id: d.bundle_id,
+                        repo: RepoId::new(&d.owner, &d.repo),
+                        service: d.service,
+                        artifact_digest: d.artifact_digest,
+                        state: d.state,
+                        taint_reason: d.taint_reason.map(|r| sanitize_public_log(&r)),
+                        deployment_id: d.deployment_id,
+                        trace_id: d.trace_id,
+                    })
+                    .collect();
+                true
+            }
+            Input::RegCasStatus(d) => {
+                self.loaded = true;
+                self.ensure_aux_defaults();
+                self.registry.cas = CasHealth {
+                    blob_count: d.blob_count,
+                    dedup_bytes: d.dedup_bytes,
+                    raw_bytes: d.raw_bytes,
+                    dedup_ratio_bp: d.dedup_ratio_bp,
+                    gc_watermark_pct: d.gc_watermark_pct,
+                    last_scrub_epoch_ms: d.last_scrub_epoch_ms,
+                    corrupt_blobs: d.corrupt_blobs,
+                };
+                true
+            }
+            Input::ObsSmartscape(d) => {
+                self.loaded = true;
+                self.ensure_aux_defaults();
+                self.observe.smartscape_nodes = d
+                    .nodes
+                    .into_iter()
+                    .map(|n| SmartscapeNode {
+                        id: n.id,
+                        label: sanitize_public_log(&n.label),
+                        layer: n.layer,
+                        req_per_sec_bp: n.req_per_sec_bp,
+                        error_rate_bp: n.error_rate_bp,
+                        p95_ms: n.p95_ms,
+                        healthy: n.healthy,
+                    })
+                    .collect();
+                self.observe.smartscape_edges = d
+                    .edges
+                    .into_iter()
+                    .map(|e| SmartscapeEdge {
+                        from_id: e.from_id,
+                        to_id: e.to_id,
+                        protocol: e.protocol,
+                        call_rate_rps: e.call_rate_rps,
+                        error_rate_bp: e.error_rate_bp,
+                        p95_ms: e.p95_ms,
+                    })
+                    .collect();
+                true
+            }
+            Input::ObsProblems(list) => {
+                self.loaded = true;
+                self.ensure_aux_defaults();
+                self.observe.problems = list
+                    .into_iter()
+                    .map(|p| SloProblem {
+                        problem_id: p.problem_id,
+                        title: sanitize_public_log(&p.title),
+                        category: p.category,
+                        severity: p.severity,
+                        burn_rate_bp: p.burn_rate_bp,
+                        impacted_entity: sanitize_public_log(&p.impacted_entity),
+                        root_cause_trace_id: p.root_cause_trace_id,
+                        active: p.active,
+                    })
+                    .collect();
+                true
+            }
+            Input::ObsTraces(list) => {
+                self.loaded = true;
+                self.ensure_aux_defaults();
+                self.observe.traces = list.into_iter().map(trace_from_dto).collect();
+                true
+            }
+            Input::ObsTraceDetail(d) => {
+                self.loaded = true;
+                self.ensure_aux_defaults();
+                let trace = trace_from_dto(d);
+                if let Some(slot) = self
+                    .observe
+                    .traces
+                    .iter_mut()
+                    .find(|t| t.trace_id == trace.trace_id)
+                {
+                    *slot = trace;
+                } else {
+                    self.observe.traces.push(trace);
+                }
+                true
+            }
+            Input::ObsLogs(list) => {
+                self.loaded = true;
+                self.ensure_aux_defaults();
+                self.observe.logs = list
+                    .into_iter()
+                    .map(|l| OtelLogEntry {
+                        timestamp_ms: l.timestamp_ms,
+                        severity: l.severity,
+                        service: l.service,
+                        span_id: l.span_id,
+                        trace_id: l.trace_id,
+                        message: sanitize_public_log(&l.message),
+                    })
+                    .collect();
+                true
+            }
+            Input::ObsMetrics(list) => {
+                self.loaded = true;
+                self.ensure_aux_defaults();
+                self.observe.metrics = list
+                    .into_iter()
+                    .map(|m| HardwareMetricSeries {
+                        service: m.service,
+                        hardware_class: sanitize_public_log(&m.hardware_class),
+                        rps: m.rps,
+                        error_rate_bp: m.error_rate_bp,
+                        p50_ms: m.p50_ms,
+                        p95_ms: m.p95_ms,
+                        p99_ms: m.p99_ms,
+                        exemplar_trace_id: m.exemplar_trace_id,
+                        samples: m.samples,
+                    })
+                    .collect();
+                true
+            }
+            Input::ObsStoreStatus(d) => {
+                self.loaded = true;
+                self.ensure_aux_defaults();
+                self.observe.store = DataStoreHealth {
+                    hot_duckdb_rows: d.hot_duckdb_rows,
+                    hot_duckdb_bytes: d.hot_duckdb_bytes,
+                    cold_parquet_partitions: d.cold_parquet_partitions,
+                    cold_parquet_rows: d.cold_parquet_rows,
+                    cold_parquet_bytes: d.cold_parquet_bytes,
+                    zstd_compression_bp: d.zstd_compression_bp,
+                    retention_days: d.retention_days,
+                    oldest_watermark_iso: d.oldest_watermark_iso,
+                };
+                true
+            }
             Input::BranchCreated(e) => self.branch_created(&e),
             Input::BranchDeleted(e) => self.branch_deleted(&e, now_ms),
             Input::PrStateChanged(e) => self.pr_state(&e, now_ms),
@@ -230,10 +1071,22 @@ impl Store {
                 g.rollback_reason = Some(e.reason);
                 g.restore_slot = e.restore_slot;
             }),
-            Input::Tainted(e) => self.with_gate(&e.deployment_id, |g| {
-                g.outcome = GateOutcome::Tainted;
-                g.tainted = true;
-            }),
+            Input::Tainted(e) => {
+                let gate_changed = self.with_gate(&e.deployment_id, |g| {
+                    g.outcome = GateOutcome::Tainted;
+                    g.tainted = true;
+                });
+                if let Some(c) = self
+                    .registry
+                    .canaries
+                    .iter_mut()
+                    .find(|c| c.deployment_id == e.deployment_id)
+                {
+                    c.state = CanaryBundleState::Tainted;
+                    c.taint_reason = Some(sanitize_public_log(&e.reason));
+                }
+                gate_changed
+            }
             Input::LeaseExpired(e) => self.with_gate(&e.deployment_id, |g| {
                 if !g.outcome.is_final() {
                     g.outcome = GateOutcome::RolledBack;
@@ -299,6 +1152,7 @@ impl Store {
     fn repos_loaded(&mut self, list: Vec<RepoDto>) -> bool {
         self.loaded = true;
         self.offline = None;
+        self.ensure_aux_defaults();
         let mut next = BTreeMap::new();
         for d in list {
             let id = RepoId::new(&d.owner, &d.repo);
@@ -351,6 +1205,7 @@ impl Store {
 
     fn topology(&mut self, d: TopologyDto) -> bool {
         self.loaded = true;
+        self.ensure_aux_defaults();
         let repo = RepoId::new(&d.owner, &d.repo);
         let stations: Vec<Station> = d
             .stations
@@ -382,13 +1237,14 @@ impl Store {
             .map(|t| {
                 let mut states = t.stage_states;
                 states.resize(n, StageState::Pending);
+                let clean_node = t.node_id.map(|id| sanitize_public_log(&id));
                 Train {
                     job_id: t.job_id,
                     stage: station_index(&stations, &t.stage),
-                    node_lost: self.node_offline(t.node_id.as_deref()),
+                    node_lost: self.node_offline(clean_node.as_deref()),
                     ref_name: t.ref_name,
                     stage_states: states,
-                    node_id: t.node_id,
+                    node_id: clean_node,
                 }
             })
             .collect();
@@ -505,12 +1361,11 @@ impl Store {
 
     fn job_stage(&mut self, e: &JobStageChangedDto) -> bool {
         let repo_id = RepoId::new(&e.owner, &e.repo);
-        let node_lost = self.node_offline(e.node_id.as_deref());
+        let clean_node = e.node_id.as_ref().map(|n| sanitize_public_log(n));
+        let node_lost = self.node_offline(clean_node.as_deref());
         let mut changed = false;
         let mut default_train_status = None;
         if let Some(t) = self.topologies.get_mut(&repo_id).map(|t| &mut t.t) {
-            // One train per lane: a newer job on the same ref replaces older
-            // ones; events for an older job are stale.
             if t.trains
                 .iter()
                 .any(|tr| tr.ref_name == e.ref_name && tr.job_id > e.job_id)
@@ -542,14 +1397,14 @@ impl Store {
                 ref_name: e.ref_name.clone(),
                 stage,
                 stage_states: states,
-                node_id: e.node_id.clone(),
+                node_id: clean_node.clone(),
                 node_lost,
             };
             if e.ref_name == t.default_branch {
                 default_train_status = Some(train_status(&train));
             } else if let Some(b) = t.branches.iter_mut().find(|b| b.ref_name == e.ref_name) {
                 b.last_job = Some(e.job_id);
-                if b.phase == SidingPhase::UnderConstruction && e.node_id.is_some() {
+                if b.phase == SidingPhase::UnderConstruction && clean_node.is_some() {
                     b.phase = SidingPhase::Active;
                 }
             } else {
@@ -583,16 +1438,17 @@ impl Store {
     }
 
     fn node_membership(&mut self, e: &NodeMembershipChangedDto) -> bool {
+        let clean_id = sanitize_public_log(&e.node_id);
         let node = FabricNode {
-            id: e.node_id.clone(),
+            id: clean_id.clone(),
             online: e.online,
         };
-        let changed = self.nodes.get(&e.node_id) != Some(&node);
-        self.nodes.insert(e.node_id.clone(), node);
+        let changed = self.nodes.get(&clean_id) != Some(&node);
+        self.nodes.insert(clean_id.clone(), node);
         for topo in self.topologies.values_mut() {
             let mut touched = false;
             for tr in &mut topo.t.trains {
-                if tr.node_id.as_deref() == Some(e.node_id.as_str()) && tr.node_lost == e.online {
+                if tr.node_id.as_deref() == Some(clean_id.as_str()) && tr.node_lost == e.online {
                     tr.node_lost = !e.online;
                     touched = true;
                 }
@@ -606,6 +1462,7 @@ impl Store {
 
     fn deployments(&mut self, repo: &RepoId, list: &[DeploymentDto]) -> bool {
         self.loaded = true;
+        self.ensure_aux_defaults();
         let mut sorted: Vec<&DeploymentDto> = list.iter().collect();
         sorted.sort_by_key(|a| std::cmp::Reverse(a.started_epoch_ms));
         let history: Vec<DeploymentSummary> = sorted
@@ -651,13 +1508,14 @@ impl Store {
 
     fn gate(&mut self, d: GateDto) -> bool {
         self.loaded = true;
+        self.ensure_aux_defaults();
         let id = d.deployment_id.clone();
         let gate = DeploymentGate {
             deployment_id: d.deployment_id,
             repo: RepoId::new(&d.owner, &d.repo),
             service: d.service,
             artifact_digest: d.artifact_digest,
-            target_node: d.target_node,
+            target_node: sanitize_public_log(&d.target_node),
             staged_slot: d.staged_slot,
             restore_slot: d.restore_slot,
             lease_expires_epoch_ms: d.lease_expires_epoch_ms,
@@ -673,7 +1531,7 @@ impl Store {
                     state: t.state,
                     duration_ms: t.duration_ms,
                     crate_name: t.crate_name,
-                    log_excerpt: t.log_excerpt,
+                    log_excerpt: t.log_excerpt.map(|l| sanitize_public_log(&l)),
                 })
                 .collect(),
         };
@@ -767,12 +1625,24 @@ impl Store {
                 .count(),
         )
         .unwrap_or(u32::MAX);
+        let registry = u32::try_from(
+            self.registry
+                .canaries
+                .iter()
+                .filter(|c| c.state == CanaryBundleState::Tainted)
+                .count()
+                + usize::from(self.registry.cas.corrupt_blobs > 0),
+        )
+        .unwrap_or(u32::MAX);
+        let observe = u32::try_from(self.observe.problems.iter().filter(|p| p.active).count())
+            .unwrap_or(u32::MAX);
         let fleet =
             u32::try_from(self.nodes.values().filter(|n| !n.online).count()).unwrap_or(u32::MAX);
         AreaBadges {
-            overview: ci.saturating_add(cd).saturating_add(fleet),
             ci,
             cd,
+            registry,
+            observe,
             fleet,
         }
     }
@@ -830,8 +1700,41 @@ impl Store {
             history,
             nodes: self.nodes.values().cloned().collect(),
             stale_since_epoch_ms: None,
+            leases: self.leases.clone(),
+            sandboxes: self.sandboxes.clone(),
+            registry: self.registry.clone(),
+            observe: self.observe.clone(),
             auth: self.auth.clone(),
         }
+    }
+}
+
+fn trace_from_dto(d: TraceDto) -> PurePathTrace {
+    PurePathTrace {
+        trace_id: d.trace_id,
+        root_service: d.root_service,
+        root_operation: sanitize_public_log(&d.root_operation),
+        domain: d.domain,
+        duration_ms: d.duration_ms,
+        error: d.error,
+        slow_p99: d.slow_p99,
+        started_epoch_ms: d.started_epoch_ms,
+        spans: d
+            .spans
+            .into_iter()
+            .map(|s| TraceSpan {
+                span_id: s.span_id,
+                parent_span_id: s.parent_span_id,
+                service: s.service,
+                operation: sanitize_public_log(&s.operation),
+                start_offset_us: s.start_offset_us,
+                duration_us: s.duration_us,
+                self_time_us: s.self_time_us,
+                critical_path: s.critical_path,
+                error: s.error,
+                hardware_class: sanitize_public_log(&s.hardware_class),
+            })
+            .collect(),
     }
 }
 
@@ -861,12 +1764,21 @@ fn badges_of_view(v: &ViewModel) -> AreaBadges {
         .filter_map(|r| r.cd.as_ref())
         .filter(|c| matches!(c.outcome, GateOutcome::RolledBack | GateOutcome::Tainted))
         .count();
+    let registry = v
+        .registry
+        .canaries
+        .iter()
+        .filter(|c| c.state == CanaryBundleState::Tainted)
+        .count()
+        + usize::from(v.registry.cas.corrupt_blobs > 0);
+    let observe = v.observe.problems.iter().filter(|p| p.active).count();
     let fleet = v.nodes.iter().filter(|n| !n.online).count();
     let c = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
     AreaBadges {
-        overview: c(ci + cd + fleet),
         ci: c(ci),
         cd: c(cd),
+        registry: c(registry),
+        observe: c(observe),
         fleet: c(fleet),
     }
 }

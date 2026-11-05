@@ -1,22 +1,25 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Interactive console state machine for `C1`–`C6`, keyboard shortcuts,
-//! rotary 350 ms settle debounce, `PullToTurn` restart guard, and
-//! `Hurmit` ↔ `OpenDyslexicM` reading-font persistence.
+//! Interactive console state machine for `C1`–`C6`, `SubViewBar`, Registry &
+//! Observe sub-views, keyboard shortcuts, rotary 350 ms settle debounce,
+//! `PullToTurn` restart guard, and `Hurmit` <-> `OpenDyslexicM` persistence.
 
 use std::collections::BTreeMap;
 
 use muconsole_protocol::{
-    Area, AuthState, CrtFont, PanelId, RepoId, RepoScore, Route, SubmoduleId, UiCommand,
+    Area, AuthState, CdSubView, CiSubView, CrtFont, LogSeverity, ObserveSubView, PackageEcosystem,
+    PanelId, RegistrySubView, RepoId, RepoScore, Route, SubView, SubmoduleId, UiCommand,
 };
 use muconsole_theme::instruments::switch::SwitchAction;
 use muconsole_theme::interaction::{SwitchEvent, SwitchOutcome, SwitchState};
 use muconsole_theme::metrics::{CrtFontMetrics, HURMIT, OPEN_DYSLEXIC};
 
 use crate::client::{ClientUpdate, DataClient};
-use crate::router::{area_label, escape_up, parse_hash};
+use crate::router::{area_label, escape_up, parse_area, parse_hash, parse_subview};
 
 /// `localStorage` key persisting the user's selected CRT reading font.
-pub const FONT_STORAGE_KEY: &str = "muconsole.font";
+pub const FONT_STORAGE_KEY: &str = "muconsole.dyslexia_font";
+/// `localStorage` key persisting the user's active repository/submodule selection.
+pub const REPO_STORAGE_KEY: &str = "muconsole.active_repo";
 /// `sessionStorage` key holding a captured one-time `?invite=<token>` across OAuth redirects.
 pub const PENDING_INVITE_STORAGE_KEY: &str = "muconsole.pending_invite";
 /// Rotary settle window before dispatching [`UiCommand::SelectRepo`].
@@ -24,8 +27,8 @@ pub const ROTARY_SETTLE_MS: u64 = 350;
 /// Armed confirmation window (ms) for the guarded Trainway `RESTART` control.
 pub const RESTART_ARM_WINDOW_MS: u64 = 3_000;
 
-/// Ordered areas on the C1 selector rail.
-pub const AREAS: [Area; 4] = [Area::Overview, Area::Ci, Area::Cd, Area::Fleet];
+/// Ordered areas on the C1 selector rail (`CI`, `CD`, `REG`, `OBS`, `FLT`).
+pub const AREAS: [Area; 5] = Area::ALL;
 
 /// Extract `?invite=<token>` from a URL query string and return `(Some(token), sanitized_query)`
 /// with the `invite` parameter stripped so one-time invite tokens are removed from browser history.
@@ -63,16 +66,26 @@ pub fn extract_invite_token(query: &str) -> (Option<String>, String) {
 pub fn parse_font_pref(query: &str, stored: Option<&str>) -> CrtFont {
     for pair in query.trim_start_matches('?').split('&') {
         if let Some(("font", val)) = pair.split_once('=') {
-            if val.eq_ignore_ascii_case("dyslexic") || val.eq_ignore_ascii_case("opendyslexic") {
+            if val.eq_ignore_ascii_case("dyslexic")
+                || val.eq_ignore_ascii_case("opendyslexic")
+                || val.eq_ignore_ascii_case("true")
+                || val == "1"
+            {
                 return CrtFont::OpenDyslexic;
             }
-            if val.eq_ignore_ascii_case("hurmit") {
+            if val.eq_ignore_ascii_case("hurmit") || val.eq_ignore_ascii_case("false") || val == "0"
+            {
                 return CrtFont::Hurmit;
             }
         }
     }
     if let Some(s) = stored {
-        if s.eq_ignore_ascii_case("dyslexic") || s.eq_ignore_ascii_case("opendyslexic") {
+        let s = s.trim();
+        if s.eq_ignore_ascii_case("dyslexic")
+            || s.eq_ignore_ascii_case("opendyslexic")
+            || s.eq_ignore_ascii_case("true")
+            || s == "1"
+        {
             return CrtFont::OpenDyslexic;
         }
     }
@@ -105,9 +118,9 @@ pub struct ConsoleState {
     pub filter_focused: bool,
     /// Pending rotary selection waiting for the 350 ms settle window (`due_ms`).
     pub pending_select_at_ms: Option<u64>,
-    /// Phone bottom-sheet rotary visibility.
+    /// Phone bottom-sheet repo selector visibility.
     pub phone_rotary_open: bool,
-    /// C4 Scorecard carousel page index.
+    /// C4 Scorecard page index.
     pub carousel_page: u32,
     /// Persistent Trainway siding lane assignments (`ref_name -> lane`).
     pub trainway_lanes: BTreeMap<String, u32>,
@@ -127,8 +140,22 @@ pub struct ConsoleState {
     pub selected_test_idx: usize,
     /// C6 Delivery log excerpt page cursor.
     pub log_page: u32,
-    /// Fleet telemetry page cursor (`0` = node locks, `1` = sandbox telemetry).
+    /// Fleet telemetry page cursor.
     pub fleet_page: u32,
+    /// `REG > Packages` ecosystem filter (`None` = `ALL`).
+    pub reg_ecosystem_filter: Option<PackageEcosystem>,
+    /// `REG > Packages` selected package name for the version/dependency drawer.
+    pub selected_package: Option<String>,
+    /// `OBS > Smartscape` selected entity ID for the side inspection drawer.
+    pub selected_entity_id: Option<String>,
+    /// `OBS > PurePath` quick-filter pill (`ALL`, `ERRORS`, `SLOW P99`, `CI`, `CD`, `REGISTRY`).
+    pub purepath_filter: String,
+    /// `OBS > PurePath` selected trace ID.
+    pub selected_trace_id: Option<String>,
+    /// `OBS > PurePath` selected span ID.
+    pub selected_span_id: Option<String>,
+    /// `OBS > Logs` severity filter (`None` = `ALL`).
+    pub log_severity_filter: Option<LogSeverity>,
     /// Polite `aria-live` announcement text.
     pub aria_polite: String,
     /// Assertive `aria-live` alert text.
@@ -149,11 +176,14 @@ impl ConsoleState {
         Self {
             client: DataClient::new(),
             route: Route {
-                area: Area::Overview,
+                area: Area::Ci,
+                subview: SubView::Ci(CiSubView::Scorecards),
                 repo: None,
                 submodule: None,
                 branch: None,
                 job: None,
+                trace_id: None,
+                filter: None,
             },
             font: CrtFont::Hurmit,
             lazy_dyslexic_loaded: false,
@@ -175,6 +205,13 @@ impl ConsoleState {
             selected_test_idx: 0,
             log_page: 0,
             fleet_page: 0,
+            reg_ecosystem_filter: None,
+            selected_package: None,
+            selected_entity_id: None,
+            purepath_filter: "ALL".into(),
+            selected_trace_id: None,
+            selected_span_id: None,
+            log_severity_filter: None,
             aria_polite: String::new(),
             aria_assertive: String::new(),
             pending_invite: None,
@@ -183,13 +220,77 @@ impl ConsoleState {
 
     /// Initialize route, font preference, and any `?invite=<token>` from browser location + storage.
     pub fn init_from_env(&mut self, hash: &str, search: &str, stored_font: Option<&str>) {
-        self.route = parse_hash(hash);
+        self.apply_hash(hash);
         let (invite, _) = extract_invite_token(search);
         if invite.is_some() {
             self.pending_invite = invite;
         }
         let f = parse_font_pref(search, stored_font);
         self.set_font(f);
+    }
+
+    /// Apply a location hash and synchronize sub-view filters / trace selection.
+    pub fn apply_hash(&mut self, hash: &str) {
+        self.route = parse_hash(hash);
+        if let Some(tr) = self.route.trace_id.clone() {
+            self.selected_trace_id = Some(tr);
+        }
+        if let Some(flt) = self.route.filter.clone() {
+            match self.route.subview {
+                SubView::Observe(ObserveSubView::PurePath) => {
+                    self.purepath_filter = flt.to_ascii_uppercase();
+                }
+                SubView::Observe(ObserveSubView::Logs) => {
+                    self.log_severity_filter = match flt.to_ascii_uppercase().as_str() {
+                        "ERROR" | "ERRORS" => Some(LogSeverity::Error),
+                        "WARN" => Some(LogSeverity::Warn),
+                        "INFO" => Some(LogSeverity::Info),
+                        _ => None,
+                    };
+                }
+                SubView::Registry(RegistrySubView::Packages) => {
+                    self.reg_ecosystem_filter = match flt.to_ascii_uppercase().as_str() {
+                        "CARGO" => Some(PackageEcosystem::Cargo),
+                        "NUGET" => Some(PackageEcosystem::NuGet),
+                        "MAVEN" => Some(PackageEcosystem::Maven),
+                        _ => None,
+                    };
+                }
+                _ => {}
+            }
+        }
+        self.sync_rotary_from_route();
+    }
+
+    /// Restore active repository from `localStorage` (`muconsole.active_repo`) when URL has none.
+    pub fn restore_stored_repo(&mut self, stored_repo: Option<&str>) {
+        if self.route.repo.is_some() {
+            return;
+        }
+        let Some(raw) = stored_repo.map(str::trim).filter(|s| !s.is_empty()) else {
+            return;
+        };
+        let (repo_part, sub_part) = raw.split_once("::").unwrap_or((raw, ""));
+        if let Some((owner, repo)) = repo_part.split_once('/') {
+            if !owner.is_empty() && !repo.is_empty() {
+                self.route.repo = Some(RepoId::new(owner, repo));
+                if !sub_part.is_empty() {
+                    self.route.submodule = Some(SubmoduleId {
+                        path: sub_part.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// Serialize active repo + submodule for `localStorage` (`muconsole.active_repo`).
+    #[must_use]
+    pub fn stored_repo_value(&self) -> Option<String> {
+        let repo = self.route.repo.as_ref()?;
+        match self.route.submodule.as_ref() {
+            Some(sub) => Some(format!("{}/{}::{}", repo.owner, repo.repo, sub.path)),
+            None => Some(format!("{}/{}", repo.owner, repo.repo)),
+        }
     }
 
     /// Current operator authentication state from the view model (defaults to [`AuthState::Anonymous`]).
@@ -247,6 +348,10 @@ impl ConsoleState {
                             self.route.submodule.clone_from(&sel.submodule);
                         }
                     }
+                    if self.selected_trace_id.is_none() {
+                        self.selected_trace_id =
+                            v.observe.traces.first().map(|t| t.trace_id.clone());
+                    }
                     if v.topology
                         .as_ref()
                         .is_some_and(muconsole_protocol::RepoTopology::stop)
@@ -285,7 +390,7 @@ impl ConsoleState {
             .collect()
     }
 
-    /// Scorecards ordered for C4 Carousel: selected parent repo first, then
+    /// Scorecards ordered for `CI > Scorecards`: selected parent repo first, then
     /// its submodules in `.gitmodules` order, then remaining repositories.
     #[must_use]
     pub fn ordered_carousel_repos(&self) -> Vec<RepoScore> {
@@ -408,14 +513,65 @@ impl ConsoleState {
         }
     }
 
-    /// Select an area on C1 (`OVR`, `CI`, `CD`, `FLT`).
+    /// Select an area on C1 (`CI`, `CD`, `REG`, `OBS`, `FLT`).
     pub fn select_area(&mut self, area: Area) -> UiCommand {
         self.route.area = area;
-        self.aria_polite = format!("Area {}", area_label(area));
+        if self.route.subview.area() != area {
+            self.route.subview = SubView::default_for(area);
+        }
+        self.aria_polite = format!(
+            "Area {} :: {}",
+            area_label(area),
+            self.route.subview.label()
+        );
         UiCommand::Subscribe(self.route.clone())
     }
 
-    /// Step the C4 Scorecard carousel by `delta` pages.
+    /// Select a specific [`SubView`] tab in `SubViewBar`.
+    pub fn select_subview(&mut self, subview: SubView) -> Vec<UiCommand> {
+        self.route.area = subview.area();
+        self.route.subview = subview;
+        self.aria_polite = format!(
+            "Sub-view {} :: {}",
+            area_label(self.route.area),
+            subview.label()
+        );
+        vec![
+            UiCommand::Subscribe(self.route.clone()),
+            UiCommand::SelectSubView(subview),
+        ]
+    }
+
+    /// Navigate via `[TRACE ↗]` pill to `OBS > PurePath` pre-filtered to `trace_id`.
+    pub fn open_trace(&mut self, trace_id: &str) -> Vec<UiCommand> {
+        self.route.area = Area::Observe;
+        self.route.subview = SubView::Observe(ObserveSubView::PurePath);
+        self.route.trace_id = Some(trace_id.to_owned());
+        self.selected_trace_id = Some(trace_id.to_owned());
+        self.selected_span_id = None;
+        self.aria_polite = format!("Opened PurePath trace {trace_id}");
+        vec![
+            UiCommand::Subscribe(self.route.clone()),
+            UiCommand::SelectSubView(self.route.subview),
+        ]
+    }
+
+    /// Navigate via `[CD GATE ↗]` pill to `CD > Integration Gate`.
+    pub fn open_cd_gate(&mut self, deployment_id: Option<&str>) -> Vec<UiCommand> {
+        self.route.area = Area::Cd;
+        self.route.subview = SubView::Cd(CdSubView::IntegrationGate);
+        if let Some(dep) = deployment_id {
+            self.aria_polite = format!("Opened CD Integration Gate for {dep}");
+        } else {
+            self.aria_polite = "Opened CD Integration Gate".into();
+        }
+        vec![
+            UiCommand::Subscribe(self.route.clone()),
+            UiCommand::SelectSubView(self.route.subview),
+        ]
+    }
+
+    /// Step the `CI > Scorecards` page by `delta` pages.
     pub fn step_carousel(&mut self, delta: i32, cards_per_page: usize) -> UiCommand {
         let total_repos = self.ordered_carousel_repos().len();
         let per = cards_per_page.max(1);
@@ -473,47 +629,246 @@ impl ConsoleState {
         }
     }
 
-    /// Handle a keyboard shortcut and return any resulting [`UiCommand`].
-    pub fn on_key(&mut self, key: &str, shift: bool, now_ms: u64) -> Option<UiCommand> {
-        match key {
-            "[" => {
-                let idx = AREAS
-                    .iter()
-                    .position(|a| *a == self.route.area)
-                    .unwrap_or(0);
-                let prev = AREAS[(idx + AREAS.len() - 1) % AREAS.len()];
-                Some(self.select_area(prev))
+    /// Handle a DOM click on an interactive control or semantic `data-*` attribute.
+    #[allow(clippy::too_many_lines)]
+    pub fn on_dom_action(
+        &mut self,
+        attr_name: &str,
+        attr_val: &str,
+        shift: bool,
+        now_ms: u64,
+    ) -> Vec<UiCommand> {
+        match attr_name {
+            "data-area" => {
+                if let Some(area) = parse_area(attr_val) {
+                    let cmd = self.select_area(area);
+                    return vec![cmd, UiCommand::SelectSubView(self.route.subview)];
+                }
             }
-            "]" => {
-                let idx = AREAS
-                    .iter()
-                    .position(|a| *a == self.route.area)
-                    .unwrap_or(0);
-                let next = AREAS[(idx + 1) % AREAS.len()];
-                Some(self.select_area(next))
+            "data-subview" => {
+                for area in Area::ALL {
+                    if let Some(sv) = parse_subview(area, attr_val) {
+                        return self.select_subview(sv);
+                    }
+                }
             }
-            "Escape" => {
-                if self.phone_rotary_open {
-                    self.phone_rotary_open = false;
-                    self.aria_polite = "Closed repository selector sheet".into();
-                    None
-                } else if !self.filter_query.is_empty() || self.filter_focused {
-                    self.filter_query.clear();
-                    self.filter_focused = false;
-                    self.aria_polite = "Cleared repository filter".into();
+            "data-repo-step" => match attr_val {
+                "prev" => self.rotate_outer(-1, now_ms),
+                "next" => self.rotate_outer(1, now_ms),
+                "sub-prev" => self.rotate_inner(-1, now_ms),
+                "sub-next" => self.rotate_inner(1, now_ms),
+                _ => {}
+            },
+            "data-dyslexia-toggle" => {
+                return vec![self.toggle_font()];
+            }
+            "data-trainway-restart" => {
+                if let Some(cmd) = self.on_restart_switch(
+                    SwitchEvent::Rotate {
+                        to: 1,
+                        at_ms: now_ms,
+                        shift: true,
+                    },
+                    now_ms,
+                ) {
+                    return vec![cmd];
+                }
+            }
+            "data-trace-id" => {
+                return self.open_trace(attr_val);
+            }
+            "data-cd-gate" => {
+                return self.open_cd_gate(Some(attr_val));
+            }
+            "data-ecosystem" => {
+                self.reg_ecosystem_filter = match attr_val.to_ascii_uppercase().as_str() {
+                    "CARGO" => Some(PackageEcosystem::Cargo),
+                    "NUGET" => Some(PackageEcosystem::NuGet),
+                    "MAVEN" => Some(PackageEcosystem::Maven),
+                    _ => None,
+                };
+                self.route.filter = self.reg_ecosystem_filter.map(|e| e.label().to_owned());
+                self.aria_polite = format!("Filtered packages by {attr_val}");
+            }
+            "data-package" => {
+                if self.selected_package.as_deref() == Some(attr_val) {
+                    self.selected_package = None;
+                } else {
+                    self.selected_package = Some(attr_val.to_owned());
+                }
+            }
+            "data-entity-id" => {
+                if self.selected_entity_id.as_deref() == Some(attr_val) {
+                    self.selected_entity_id = None;
+                } else {
+                    self.selected_entity_id = Some(attr_val.to_owned());
+                }
+            }
+            "data-purepath-filter" => {
+                self.purepath_filter = attr_val.to_ascii_uppercase();
+                self.route.filter = if self.purepath_filter == "ALL" {
                     None
                 } else {
-                    self.route = escape_up(&self.route);
-                    self.aria_polite = "Navigated up one level".into();
-                    Some(UiCommand::Subscribe(self.route.clone()))
-                }
+                    Some(self.purepath_filter.clone())
+                };
+                self.aria_polite = format!("PurePath filter {}", self.purepath_filter);
+            }
+            "data-select-trace" => {
+                self.selected_trace_id = Some(attr_val.to_owned());
+                self.route.trace_id = Some(attr_val.to_owned());
+                self.selected_span_id = None;
+            }
+            "data-span-id" => {
+                self.selected_span_id = Some(attr_val.to_owned());
+            }
+            "data-log-severity" => {
+                self.log_severity_filter = match attr_val.to_ascii_uppercase().as_str() {
+                    "ERROR" | "ERRORS" => Some(LogSeverity::Error),
+                    "WARN" => Some(LogSeverity::Warn),
+                    "INFO" => Some(LogSeverity::Info),
+                    _ => None,
+                };
+                self.route.filter = self.log_severity_filter.map(|s| s.label().to_owned());
+            }
+            "data-control-id" => return self.on_control_id(attr_val, shift, now_ms),
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn on_control_id(&mut self, id: &str, shift: bool, now_ms: u64) -> Vec<UiCommand> {
+        if let Some(area_slug) = id
+            .strip_prefix("c1-area-rail:")
+            .or_else(|| id.strip_prefix("c1-area-selector:"))
+        {
+            if let Some(area) = parse_area(area_slug) {
+                let cmd = self.select_area(area);
+                return vec![cmd, UiCommand::SelectSubView(self.route.subview)];
+            }
+        }
+        if let Some(sv_slug) = id.strip_prefix("c2-subview-bar:") {
+            if let Some(sv) = parse_subview(self.route.area, sv_slug) {
+                return self.select_subview(sv);
+            }
+        }
+        if let Some(repo_str) = id.strip_prefix("c4-card-select:") {
+            if let Some((owner, repo)) = repo_str.split_once('/') {
+                let rid = RepoId::new(owner, repo);
+                self.route.repo = Some(rid.clone());
+                self.route.submodule = None;
+                self.sync_rotary_from_route();
+                return vec![UiCommand::SelectRepo {
+                    repo: rid,
+                    submodule: None,
+                }];
+            }
+        }
+        match id {
+            "c2-font-switch" | "c2-font-switch:hurmit" | "c2-font-switch:dyslexic" => {
+                vec![self.toggle_font()]
+            }
+            "c2-repo-prev" | "c3-rotary:outer-prev" => {
+                self.rotate_outer(-1, now_ms);
+                Vec::new()
+            }
+            "c2-repo-next" | "c3-rotary:outer-next" | "c2-repo-select" => {
+                self.rotate_outer(1, now_ms);
+                Vec::new()
+            }
+            "c2-sub-prev" | "c3-rotary:inner-prev" => {
+                self.rotate_inner(-1, now_ms);
+                Vec::new()
+            }
+            "c2-sub-next" | "c3-rotary:inner-next" => {
+                self.rotate_inner(1, now_ms);
+                Vec::new()
+            }
+            "c2-phone-rotary-trigger" => {
+                self.phone_rotary_open = !self.phone_rotary_open;
+                Vec::new()
+            }
+            "c4-carousel-switch:prev" => vec![self.step_carousel(-1, 3)],
+            "c4-carousel-switch:next" => vec![self.step_carousel(1, 3)],
+            "c5-live-toggle" => {
+                self.trainway_live = !self.trainway_live;
+                Vec::new()
+            }
+            "c5-yard-pager" => {
+                self.yard_page = self.yard_page.wrapping_add(1);
+                Vec::new()
+            }
+            "c5-restart-switch" | "c5-restart-switch:rst" => self
+                .on_restart_switch(
+                    SwitchEvent::Rotate {
+                        to: 1,
+                        at_ms: now_ms,
+                        shift,
+                    },
+                    now_ms,
+                )
+                .into_iter()
+                .collect(),
+            "c6-log-pager" => {
+                self.log_page = self.log_page.wrapping_add(1);
+                Vec::new()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Handle a keyboard shortcut and return any resulting [`UiCommand`].
+    pub fn on_key(&mut self, key: &str, shift: bool, now_ms: u64) -> Option<UiCommand> {
+        if key == "Escape" {
+            if self.phone_rotary_open {
+                self.phone_rotary_open = false;
+                self.aria_polite = "Closed repository selector sheet".into();
+                return None;
+            }
+            if self.selected_package.is_some() {
+                self.selected_package = None;
+                self.aria_polite = "Closed package detail drawer".into();
+                return None;
+            }
+            if self.selected_entity_id.is_some() {
+                self.selected_entity_id = None;
+                self.aria_polite = "Closed Smartscape entity drawer".into();
+                return None;
+            }
+            if !self.filter_query.is_empty() || self.filter_focused {
+                self.filter_query.clear();
+                self.filter_focused = false;
+                self.aria_polite = "Cleared repository filter".into();
+                return None;
+            }
+            self.route = escape_up(&self.route);
+            self.aria_polite = "Navigated up one level".into();
+            return Some(UiCommand::Subscribe(self.route.clone()));
+        }
+
+        if self.filter_focused {
+            return None;
+        }
+
+        match key {
+            "1" => Some(self.select_area(Area::Ci)),
+            "2" => Some(self.select_area(Area::Cd)),
+            "3" => Some(self.select_area(Area::Registry)),
+            "4" => Some(self.select_area(Area::Observe)),
+            "5" => Some(self.select_area(Area::Fleet)),
+            "[" => {
+                let prev = self.route.subview.step(-1);
+                self.select_subview(prev).into_iter().next()
+            }
+            "]" => {
+                let next = self.route.subview.step(1);
+                self.select_subview(next).into_iter().next()
             }
             "/" => {
                 self.filter_focused = true;
                 self.aria_polite = "Type-ahead repository filter focused".into();
                 None
             }
-            "ArrowUp" => {
+            "ArrowUp" | "<" | "," => {
                 if shift {
                     self.rotate_inner(-1, now_ms);
                 } else {
@@ -521,7 +876,7 @@ impl ConsoleState {
                 }
                 None
             }
-            "ArrowDown" => {
+            "ArrowDown" | ">" | "." => {
                 if shift {
                     self.rotate_inner(1, now_ms);
                 } else {
@@ -531,7 +886,11 @@ impl ConsoleState {
             }
             "ArrowLeft" => Some(self.step_carousel(-1, 3)),
             "ArrowRight" => Some(self.step_carousel(1, 3)),
-            "f" | "F" if !self.filter_focused => Some(self.toggle_font()),
+            "d" | "D" | "f" | "F" => Some(self.toggle_font()),
+            "r" | "R" => {
+                self.aria_polite = "Stream reset and resynchronized".into();
+                Some(UiCommand::ResetStream)
+            }
             _ => None,
         }
     }

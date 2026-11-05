@@ -5,22 +5,6 @@
 //! [`ViewModel`] for the current selection. It sends one
 //! [`crate::DataEvent::Snapshot`] and then [`crate::DataEvent::Patch`]es
 //! produced by [`diff`]; the UI keeps a mirror up to date with [`apply`].
-//!
-//! **Canonical order.** Lists keyed by identity are kept sorted so
-//! `apply(old, diff(old, new)) == new` holds for every pair of canonical
-//! view models:
-//!
-//! - [`ViewModel::repos`] by [`RepoId`];
-//! - [`RepoTopology::branches`] by `ref_name`;
-//! - [`RepoTopology::trains`] by `job_id`;
-//! - [`ViewModel::nodes`] by `id`.
-//!
-//! [`RepoTopology::stations`] and [`DeploymentGate::tests`] keep their
-//! contract order (workflow definition / integration-test list).
-//!
-//! The `snake_case` serde names double as the JSON spelling used by the API
-//! DTOs in [`crate::dto`]; postcard ignores names, so they cost nothing on
-//! the worker wire.
 
 use alloc::format;
 use alloc::string::String;
@@ -29,6 +13,50 @@ use serde::{Deserialize, Serialize};
 
 use crate::dto::AuthSessionDto;
 use crate::model::{RepoId, SubmoduleId};
+
+/// Sanitize a log message for public display:
+/// - Partially masks private LAN IPv4 addresses (`192.168.<oct3>.<oct4>` -> `192.168.###.<oct4>`);
+/// - Redacts internal lab hostnames (`entrance`, `rubicon`, `pey-wail-deu`, `.lab.local`);
+/// - Truncates deep filesystem paths (`/a/b/c/seg1/seg2` -> `.../seg1/seg2`).
+#[must_use]
+pub fn sanitize_public_log(raw: &str) -> String {
+    let mut s = raw
+        .replace("pey-wail-deu", "worker-riscv64")
+        .replace("entrance", "node-a")
+        .replace("rubicon", "node-b")
+        .replace(".lab.local", "");
+
+    // Mask 192.168.<oct3>.<oct4> -> 192.168.###.<oct4>.
+    while let Some(idx) = s.find("192.168.") {
+        let after = &s[idx + 8..];
+        let oct3_len = after.bytes().take_while(u8::is_ascii_digit).count();
+        if oct3_len > 0 && after.as_bytes().get(oct3_len) == Some(&b'.') {
+            s.replace_range(idx + 8..idx + 8 + oct3_len, "###");
+        } else {
+            break;
+        }
+    }
+
+    // Truncate deep absolute paths with >= 3 leading segments to `.../seg1/seg2`.
+    let mut out = String::with_capacity(s.len());
+    for token in s.split_inclusive(' ') {
+        let trimmed = token.trim_end_matches(' ');
+        let trail = &token[trimmed.len()..];
+        if trimmed.starts_with('/') && trimmed.matches('/').count() >= 3 {
+            let parts: Vec<&str> = trimmed.split('/').filter(|p| !p.is_empty()).collect();
+            if parts.len() >= 3 {
+                out.push_str(&format!(
+                    ".../{}/{}{trail}",
+                    parts[parts.len() - 2],
+                    parts[parts.len() - 1]
+                ));
+                continue;
+            }
+        }
+        out.push_str(token);
+    }
+    out
+}
 
 /// Overall CI state of a repository.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -398,11 +426,316 @@ pub struct DeploymentSummary {
     pub outcome: GateOutcome,
 }
 
+/// Active TTL-bounded deployment lease (`CD > Active Leases`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CdLease {
+    pub lease_id: String,
+    pub deployment_id: String,
+    pub target_node: String,
+    pub service: String,
+    pub artifact_digest: String,
+    pub active_slot: Slot,
+    pub candidate_slot: Slot,
+    pub ttl_remaining_ms: u64,
+    pub promoted: bool,
+}
+
 /// Fabric worker node.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FabricNode {
     pub id: String,
     pub online: bool,
+}
+
+/// Declarative `MuIsolation` sandbox profile (`FLT > Sandbox Profiles`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxProfileSummary {
+    pub profile_name: String,
+    pub backend: String,
+    pub max_pids: u32,
+    pub max_slots: u32,
+    pub thread_budget: u32,
+    pub hardware_target: String,
+}
+
+/// Package ecosystem in `MuRegist` (`REG > Packages`).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum PackageEcosystem {
+    #[default]
+    Cargo,
+    #[serde(alias = "nuget")]
+    NuGet,
+    Maven,
+}
+
+impl PackageEcosystem {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Cargo => "CARGO",
+            Self::NuGet => "NUGET",
+            Self::Maven => "MAVEN",
+        }
+    }
+}
+
+/// One package in the unified `MuRegist` catalog (`REG > Packages`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistryPackage {
+    pub ecosystem: PackageEcosystem,
+    pub name: String,
+    pub latest_version: String,
+    pub versions_count: u32,
+    pub sha256_prefix: String,
+    pub deps_count: u32,
+    pub yanked: bool,
+    pub tainted: bool,
+    pub taint_reason: Option<String>,
+    pub versions: Vec<String>,
+}
+
+/// Canary bundle lifecycle state (`REG > Canary Bundles & Taints`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanaryBundleState {
+    #[default]
+    Candidate,
+    Promoted,
+    Tainted,
+    RolledBack,
+}
+
+impl CanaryBundleState {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Candidate => "CANDIDATE",
+            Self::Promoted => "PROMOTED",
+            Self::Tainted => "TAINTED",
+            Self::RolledBack => "ROLLED BACK",
+        }
+    }
+}
+
+/// Canary release bundle & taint provenance record (`REG > Canary Bundles & Taints`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CanaryBundle {
+    pub bundle_id: String,
+    pub repo: RepoId,
+    pub service: String,
+    pub artifact_digest: String,
+    pub state: CanaryBundleState,
+    pub taint_reason: Option<String>,
+    pub deployment_id: String,
+    pub trace_id: String,
+}
+
+/// Content-Addressable Storage health & scrub telemetry (`REG > CAS Storage Health`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct CasHealth {
+    pub blob_count: u64,
+    pub dedup_bytes: u64,
+    pub raw_bytes: u64,
+    /// Deduplication ratio in basis points (`245` = `2.45x`).
+    pub dedup_ratio_bp: u32,
+    pub gc_watermark_pct: u32,
+    pub last_scrub_epoch_ms: u64,
+    pub corrupt_blobs: u32,
+}
+
+/// Aggregate state for `Area::Registry` (`REG`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct RegistryView {
+    pub packages: Vec<RegistryPackage>,
+    pub canaries: Vec<CanaryBundle>,
+    pub cas: CasHealth,
+}
+
+/// Vertical layer in the 3-tier `Smartscape` topology (`OBS > Smartscape`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SmartscapeLayer {
+    #[default]
+    Service,
+    Process,
+    Host,
+}
+
+impl SmartscapeLayer {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Service => "SERVICES",
+            Self::Process => "PROCESSES",
+            Self::Host => "HOSTS",
+        }
+    }
+}
+
+/// One node in the `Smartscape` topology (`OBS > Smartscape`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmartscapeNode {
+    pub id: String,
+    pub label: String,
+    pub layer: SmartscapeLayer,
+    /// Request rate in hundredths of RPS (`1250` = `12.50 rps`).
+    pub req_per_sec_bp: u32,
+    /// Error rate in basis points (`150` = `1.50%`).
+    pub error_rate_bp: u32,
+    pub p95_ms: u32,
+    pub healthy: bool,
+}
+
+/// Directed call edge in `Smartscape` (`OBS > Smartscape`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SmartscapeEdge {
+    pub from_id: String,
+    pub to_id: String,
+    pub protocol: String,
+    pub call_rate_rps: u32,
+    pub error_rate_bp: u32,
+    pub p95_ms: u32,
+}
+
+/// One W3C trace span in a `PurePath` waterfall (`OBS > PurePath`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceSpan {
+    pub span_id: String,
+    pub parent_span_id: Option<String>,
+    pub service: String,
+    pub operation: String,
+    pub start_offset_us: u64,
+    pub duration_us: u64,
+    pub self_time_us: u64,
+    pub critical_path: bool,
+    pub error: bool,
+    pub hardware_class: String,
+}
+
+/// Distributed trace summary + span tree (`OBS > PurePath`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PurePathTrace {
+    pub trace_id: String,
+    pub root_service: String,
+    pub root_operation: String,
+    pub domain: String,
+    pub duration_ms: u32,
+    pub error: bool,
+    pub slow_p99: bool,
+    pub started_epoch_ms: u64,
+    pub spans: Vec<TraceSpan>,
+}
+
+/// Causal SLO problem category (`OBS > Problems & SLOs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProblemCategory {
+    #[default]
+    LatencyRegression,
+    ErrorRateSpike,
+    FlakyTest,
+    CanaryTaint,
+}
+
+impl ProblemCategory {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::LatencyRegression => "LATENCY REGRESSION",
+            Self::ErrorRateSpike => "ERROR RATE SPIKE",
+            Self::FlakyTest => "FLAKY TEST",
+            Self::CanaryTaint => "CANARY TAINT",
+        }
+    }
+}
+
+/// Causal anomaly / SLO breach card (`OBS > Problems & SLOs`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SloProblem {
+    pub problem_id: String,
+    pub title: String,
+    pub category: ProblemCategory,
+    pub severity: String,
+    /// SLO burn rate in basis points (`420` = `4.2x`).
+    pub burn_rate_bp: u32,
+    pub impacted_entity: String,
+    pub root_cause_trace_id: String,
+    pub active: bool,
+}
+
+/// Log severity level (`OBS > Logs`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogSeverity {
+    #[default]
+    Info,
+    Warn,
+    Error,
+}
+
+impl LogSeverity {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Info => "INFO",
+            Self::Warn => "WARN",
+            Self::Error => "ERROR",
+        }
+    }
+}
+
+/// Sanitized OpenTelemetry log record (`OBS > Logs` & `PurePath` correlated log pane).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OtelLogEntry {
+    pub timestamp_ms: u64,
+    pub severity: LogSeverity,
+    pub service: String,
+    pub span_id: Option<String>,
+    pub trace_id: String,
+    pub message: String,
+}
+
+/// Golden-signal time-series & hardware class benchmark summary (`OBS > Metrics`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HardwareMetricSeries {
+    pub service: String,
+    pub hardware_class: String,
+    pub rps: u32,
+    pub error_rate_bp: u32,
+    pub p50_ms: u32,
+    pub p95_ms: u32,
+    pub p99_ms: u32,
+    pub exemplar_trace_id: String,
+    pub samples: Vec<u32>,
+}
+
+/// Read-only DuckDB hot buffer + Parquet cold tier health (`OBS > Data Store`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DataStoreHealth {
+    pub hot_duckdb_rows: u64,
+    pub hot_duckdb_bytes: u64,
+    pub cold_parquet_partitions: u32,
+    pub cold_parquet_rows: u64,
+    pub cold_parquet_bytes: u64,
+    /// Zstd compression ratio in basis points (`385` = `3.85x`).
+    pub zstd_compression_bp: u32,
+    pub retention_days: u32,
+    pub oldest_watermark_iso: String,
+}
+
+/// Aggregate state for `Area::Observe` (`OBS`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ObserveView {
+    pub smartscape_nodes: Vec<SmartscapeNode>,
+    pub smartscape_edges: Vec<SmartscapeEdge>,
+    pub traces: Vec<PurePathTrace>,
+    pub problems: Vec<SloProblem>,
+    pub logs: Vec<OtelLogEntry>,
+    pub metrics: Vec<HardwareMetricSeries>,
+    pub store: DataStoreHealth,
 }
 
 /// Current repository / submodule selection.
@@ -423,12 +756,15 @@ pub enum DataSource {
     OfflineCache,
 }
 
-/// Alert counts per area (LCD badges next to the area lamps).
+/// Alert counts per area (LCD badges next to the 5 area lamps on `C1`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub struct AreaBadges {
-    pub overview: u32,
     pub ci: u32,
     pub cd: u32,
+    #[serde(default)]
+    pub registry: u32,
+    #[serde(default)]
+    pub observe: u32,
     pub fleet: u32,
 }
 
@@ -500,8 +836,20 @@ pub struct ViewModel {
     pub gate: Option<DeploymentGate>,
     /// History strip, newest first.
     pub history: Vec<DeploymentSummary>,
+    /// Active TTL-bounded deployment leases.
+    #[serde(default)]
+    pub leases: Vec<CdLease>,
     /// Fabric nodes, sorted by id.
     pub nodes: Vec<FabricNode>,
+    /// Declarative `MuIsolation` sandbox profiles.
+    #[serde(default)]
+    pub sandboxes: Vec<SandboxProfileSummary>,
+    /// `Area::Registry` (`REG`) view state.
+    #[serde(default)]
+    pub registry: RegistryView,
+    /// `Area::Observe` (`OBS`) view state.
+    #[serde(default)]
+    pub observe: ObserveView,
     /// Set when the data is stale (offline snapshot): when it was saved.
     pub stale_since_epoch_ms: Option<u64>,
     /// Operator authentication state.
@@ -534,8 +882,12 @@ pub enum Delta {
         lease_expires_epoch_ms: u64,
     },
     History(Vec<DeploymentSummary>),
+    Leases(Vec<CdLease>),
     NodeUpsert(FabricNode),
     NodeRemoved(String),
+    Sandboxes(Vec<SandboxProfileSummary>),
+    Registry(RegistryView),
+    Observe(ObserveView),
     Stale(Option<u64>),
     Auth(AuthState),
 }
@@ -564,8 +916,12 @@ pub fn apply(vm: &mut ViewModel, delta: &Delta) {
         Delta::Topology(t) => vm.topology = t.clone(),
         Delta::Gate(g) => vm.gate = g.clone(),
         Delta::History(h) => vm.history = h.clone(),
+        Delta::Leases(l) => vm.leases = l.clone(),
         Delta::NodeUpsert(n) => upsert_sorted(&mut vm.nodes, n.clone(), |x| x.id.as_str()),
         Delta::NodeRemoved(id) => remove_sorted(&mut vm.nodes, id.as_str(), |x| x.id.as_str()),
+        Delta::Sandboxes(s) => vm.sandboxes = s.clone(),
+        Delta::Registry(r) => vm.registry = r.clone(),
+        Delta::Observe(o) => vm.observe = o.clone(),
         Delta::Stale(s) => vm.stale_since_epoch_ms = *s,
         Delta::Auth(a) => vm.auth = a.clone(),
         Delta::FabricRev(_)
@@ -698,6 +1054,9 @@ pub fn diff(old: &ViewModel, new: &ViewModel) -> Vec<Delta> {
     if old.history != new.history {
         out.push(Delta::History(new.history.clone()));
     }
+    if old.leases != new.leases {
+        out.push(Delta::Leases(new.leases.clone()));
+    }
     diff_sorted(
         &old.nodes,
         &new.nodes,
@@ -706,6 +1065,15 @@ pub fn diff(old: &ViewModel, new: &ViewModel) -> Vec<Delta> {
         |x| Delta::NodeRemoved(x.id.clone()),
         &mut out,
     );
+    if old.sandboxes != new.sandboxes {
+        out.push(Delta::Sandboxes(new.sandboxes.clone()));
+    }
+    if old.registry != new.registry {
+        out.push(Delta::Registry(new.registry.clone()));
+    }
+    if old.observe != new.observe {
+        out.push(Delta::Observe(new.observe.clone()));
+    }
     if old.stale_since_epoch_ms != new.stale_since_epoch_ms {
         out.push(Delta::Stale(new.stale_since_epoch_ms));
     }

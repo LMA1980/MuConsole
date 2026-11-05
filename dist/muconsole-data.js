@@ -182,6 +182,9 @@ let wasm_bindgen = (function(exports) {
             __wbg_set_af5932e3f78b5648: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4) {
                 arg0.set(getStringFromWasm0(arg1, arg2), getStringFromWasm0(arg3, arg4));
             }, arguments); },
+            __wbg_set_body_1fb0f1008bfc7df6: function(arg0, arg1) {
+                arg0.body = arg1;
+            },
             __wbg_set_cache_7507c4cc5938ccc7: function(arg0, arg1) {
                 arg0.cache = __wbindgen_enum_RequestCache[arg1];
             },
@@ -247,7 +250,7 @@ let wasm_bindgen = (function(exports) {
             },
             __wbindgen_generic_0000000000000002: function(arg0, arg1) {
                 // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 1, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
-                const ret = makeMutClosure(arg0, arg1, wasm_bindgen_dff5e0f0e3f3b2c3___convert__closures_____invoke___web_sys_8c32db1788a83d91___features__gen_MessageEvent__MessageEvent______true_);
+                const ret = makeMutClosure(arg0, arg1, wasm_bindgen_dff5e0f0e3f3b2c3___convert__closures_____invoke___web_sys_28edf7abbd09dfcd___features__gen_MessageEvent__MessageEvent______true_);
                 return ret;
             },
             __wbindgen_generic_0000000000000003: function(arg0, arg1) {
@@ -280,8 +283,8 @@ let wasm_bindgen = (function(exports) {
         wasm.wasm_bindgen_dff5e0f0e3f3b2c3___convert__closures_____invoke_______true_(arg0, arg1);
     }
 
-    function wasm_bindgen_dff5e0f0e3f3b2c3___convert__closures_____invoke___web_sys_8c32db1788a83d91___features__gen_MessageEvent__MessageEvent______true_(arg0, arg1, arg2) {
-        wasm.wasm_bindgen_dff5e0f0e3f3b2c3___convert__closures_____invoke___web_sys_8c32db1788a83d91___features__gen_MessageEvent__MessageEvent______true_(arg0, arg1, arg2);
+    function wasm_bindgen_dff5e0f0e3f3b2c3___convert__closures_____invoke___web_sys_28edf7abbd09dfcd___features__gen_MessageEvent__MessageEvent______true_(arg0, arg1, arg2) {
+        wasm.wasm_bindgen_dff5e0f0e3f3b2c3___convert__closures_____invoke___web_sys_28edf7abbd09dfcd___features__gen_MessageEvent__MessageEvent______true_(arg0, arg1, arg2);
     }
 
     function wasm_bindgen_dff5e0f0e3f3b2c3___convert__closures_____invoke___wasm_bindgen_dff5e0f0e3f3b2c3___JsValue__core_37ee0ce0c4cd57d5___result__Result_____wasm_bindgen_dff5e0f0e3f3b2c3___JsError___true_(arg0, arg1, arg2) {

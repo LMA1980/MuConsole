@@ -158,6 +158,7 @@ impl Skin for WireframeSkin {
             let bg = if dyslexic_on { "#122b22" } else { "#182232" };
             w.tag("g")
                 .attr("data-control-id", s.control_id)
+                .attr("data-dyslexia-toggle", "true")
                 .attr("data-bbox-x", r.x)
                 .attr("data-bbox-y", r.y)
                 .attr("data-bbox-w", r.w)
@@ -306,6 +307,18 @@ impl Skin for WireframeSkin {
             let opt_id = format!("{}:{}", s.control_id, opt.id);
             w.tag("g")
                 .attr("data-control-id", opt_id)
+                .attr_opt(
+                    "data-area",
+                    (s.control_id == "c1-area-selector").then_some(opt.id),
+                )
+                .attr_opt(
+                    "data-subview",
+                    (s.control_id == "c2-subview-bar").then_some(opt.id),
+                )
+                .attr_opt(
+                    "data-trainway-restart",
+                    (s.control_id == "c5-restart-switch" && opt.id == "rst").then_some("true"),
+                )
                 .attr("data-option-index", i)
                 .attr("role", if is_button_group { "button" } else { "radio" })
                 .attr("aria-checked", if active { "true" } else { "false" })
@@ -377,8 +390,15 @@ impl Skin for WireframeSkin {
     #[allow(clippy::too_many_lines)]
     fn rotary(&self, w: &mut SvgWriter, r: &Rotary<'_>) {
         let rect = r.rect;
+        let repo_step = match r.control_id {
+            "c2-repo-prev" => Some("prev"),
+            "c2-repo-next" | "c2-repo-select" => Some("next"),
+            "c2-sub-next" => Some("sub-next"),
+            _ => None,
+        };
         w.tag("g")
             .attr("data-control-id", r.control_id)
+            .attr_opt("data-repo-step", repo_step)
             .attr("data-bbox-x", rect.x)
             .attr("data-bbox-y", rect.y)
             .attr("data-bbox-w", rect.w)
@@ -633,8 +653,15 @@ impl Skin for WireframeSkin {
 
     fn readout(&self, w: &mut SvgWriter, r: &Readout<'_>) {
         let rect = r.rect;
+        let repo_step = match r.control_id {
+            "c2-repo-prev" => Some("prev"),
+            "c2-repo-next" | "c2-repo-select" => Some("next"),
+            "c2-sub-next" => Some("sub-next"),
+            _ => None,
+        };
         w.tag("g")
             .attr("data-control-id", r.control_id)
+            .attr_opt("data-repo-step", repo_step)
             .attr("data-bbox-x", rect.x)
             .attr("data-bbox-y", rect.y)
             .attr("data-bbox-w", rect.w)
@@ -844,6 +871,14 @@ fn emit_screen_row(
     if let Some(cid) = row.control_id {
         w.tag("g")
             .attr("data-control-id", cid)
+            .attr_opt("data-trace-id", cid.strip_prefix("trace:"))
+            .attr_opt("data-cd-gate", cid.strip_prefix("gate:"))
+            .attr_opt("data-package", cid.strip_prefix("pkg:"))
+            .attr_opt("data-entity-id", cid.strip_prefix("entity:"))
+            .attr_opt("data-span-id", cid.strip_prefix("span:"))
+            .attr_opt("data-ecosystem", cid.strip_prefix("eco:"))
+            .attr_opt("data-purepath-filter", cid.strip_prefix("ppfilter:"))
+            .attr_opt("data-log-severity", cid.strip_prefix("logsev:"))
             .attr("role", "button")
             .attr("tabindex", 0_u32)
             .attr("aria-selected", if row.selected { "true" } else { "false" })

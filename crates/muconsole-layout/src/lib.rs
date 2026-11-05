@@ -3,9 +3,9 @@
 //!
 //! `solve(viewport, safe_area, area, font) -> Frames` places every top-level
 //! region of the console so that **nothing overflows and the page never
-//! scrolls**: the frames exactly tile the usable canvas, and each CRT gets a
-//! metric-aware column grid with at least one row and one column. Overflow
-//! inside a panel is handled by panel-local paging, never by scrollbars.
+//! scrolls**: the frames exactly tile the usable canvas, and the active
+//! sub-view canvas gets a metric-aware column grid with at least one row and
+//! one column.
 //!
 //! The crate has no browser dependencies; it is unit tested natively for
 //! every target viewport and both CRT fonts.
@@ -35,10 +35,7 @@ impl Viewport {
     }
 
     /// Map `window.visualViewport` (`width`, `height`, `scale`) to the
-    /// layout canvas. The visual viewport shrinks while pinch-zoomed, so the
-    /// size is multiplied back by `scale`; this also tracks the iOS Safari
-    /// toolbar collapsing without hard-coded heights. Non-finite or
-    /// non-positive scales count as 1.
+    /// layout canvas.
     #[must_use]
     pub fn from_visual_viewport(width: f64, height: f64, scale: f64) -> Self {
         let s = if scale.is_finite() && scale > 0.0 {
@@ -71,15 +68,15 @@ impl SafeArea {
 /// Breakpoint class (decided here, not in CSS).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Breakpoint {
-    /// w ≥ 1280 and h ≥ 760: 80 px switch rail, 3 cards + carousel switch +
-    /// rotary, Trainway and Delivery side by side.
+    /// w >= 1280 and h >= 760: 80 px switch rail, C2 top bar, 36 px SubViewBar,
+    /// full-canvas ActiveSubViewCanvas.
     Wide,
-    /// Everything between: 80 px rail, up to 2 cards + rotary, Delivery
-    /// collapsed to the gate summary.
+    /// Everything between: 80 px rail, C2 top bar, 36 px SubViewBar,
+    /// full-canvas ActiveSubViewCanvas.
     Medium,
-    /// h < 480: 72 px rail, no carousel, Trainway / Delivery as pages.
+    /// h < 480: 72 px rail, compact bars, full-canvas ActiveSubViewCanvas.
     CompactLandscape,
-    /// w < 520: bottom selector strip, 1 card, swipe pages.
+    /// w < 520: bottom selector strip, compact bars, full-canvas ActiveSubViewCanvas.
     Phone,
 }
 
@@ -97,12 +94,27 @@ pub fn classify(width: f64, height: f64) -> Breakpoint {
     }
 }
 
-/// Dashboard panel kind.
+/// Dashboard panel kind corresponding to the active top-level area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PanelKind {
     Trainway,
     Delivery,
+    Registry,
+    Observe,
     Fleet,
+}
+
+impl PanelKind {
+    #[must_use]
+    pub const fn for_area(area: Area) -> Self {
+        match area {
+            Area::Ci => Self::Trainway,
+            Area::Cd => Self::Delivery,
+            Area::Registry => Self::Registry,
+            Area::Observe => Self::Observe,
+            Area::Fleet => Self::Fleet,
+        }
+    }
 }
 
 /// One dashboard panel: tungsten plate, CRT glass and its text grid.
@@ -116,7 +128,7 @@ pub struct Panel {
     pub grid: CrtGrid,
 }
 
-/// One twin-CRT scorecard module.
+/// One twin-CRT scorecard module (used inside the `CI -> Scorecards` sub-view).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Card {
     pub plate: Rect,
@@ -126,13 +138,11 @@ pub struct Card {
     pub cd_grid: CrtGrid,
 }
 
-/// Carousel row.
+/// Legacy carousel container retained for `Card` grid helpers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Carousel {
     pub cards: Vec<Card>,
-    /// 3-position spring-return CAROUSEL switch plate (Wide only).
     pub switch: Option<Rect>,
-    /// Lamp page dots.
     pub dots: Rect,
 }
 
@@ -148,6 +158,13 @@ impl Carousel {
 }
 
 /// Solved frames for one viewport.
+///
+/// Following the usability-first single-sub-view architecture, every viewport
+/// consists of 4 non-overlapping top-level regions:
+/// 1. `nav` (`C1` left rail on desktop/landscape, bottom bar on phone)
+/// 2. `top_bar` (`C2` breadcrumb + compact Repo/Submodule selector + status + font switch)
+/// 3. `subview_bar` (`36px` horizontal sub-view tab bar)
+/// 4. `active_canvas` (`100%` of remaining height dedicated to the active sub-view)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Frames {
     pub breakpoint: Breakpoint,
@@ -155,29 +172,27 @@ pub struct Frames {
     pub canvas: Rect,
     /// Area navigation: switch rail (desktop) or bottom selector strip.
     pub nav: Rect,
-    /// Breadcrumb bar.
+    /// Breadcrumb bar (`C2`).
     pub top_bar: Rect,
+    /// Horizontal sub-view tab strip (`36px` tall) directly below `top_bar`.
+    pub subview_bar: Rect,
+    /// Full-canvas container for the single active sub-view.
+    pub active_canvas: Rect,
+    /// Deprecated compound-view carousel (always `None` in single-sub-view layout).
     pub carousel: Option<Carousel>,
-    /// Repository rotary module (reference 302×192; scale by `h / 192`).
-    /// `None` on the phone, where it opens as a bottom sheet.
+    /// Deprecated standalone rotary module (always `None`; replaced by `C2` repo selector).
     pub rotary: Option<Rect>,
+    /// Single full-canvas panel matching `active_canvas`.
     pub panels: Vec<Panel>,
-    /// Number of dashboard pages.
+    /// Number of dashboard pages (always `1` in single-sub-view layout).
     pub pages: u32,
 }
 
 impl Frames {
-    /// Top-level regions that must tile the canvas without overlapping
-    /// (panels of page 0 only; other pages occupy the same rect).
+    /// Top-level regions that tile the canvas without overlapping.
     #[must_use]
     pub fn regions(&self) -> Vec<Rect> {
-        let mut out = vec![self.nav, self.top_bar];
-        if let Some(c) = &self.carousel {
-            out.push(c.bounds());
-        }
-        out.extend(self.rotary);
-        out.extend(self.panels.iter().filter(|p| p.page == 0).map(|p| p.plate));
-        out
+        vec![self.nav, self.top_bar, self.subview_bar, self.active_canvas]
     }
 
     /// Panels on `page`.
@@ -194,41 +209,23 @@ pub const RAIL_GAP: f64 = 8.0;
 pub const RAIL_W: f64 = 80.0;
 /// Compact-landscape rail plate width.
 pub const RAIL_W_COMPACT: f64 = 72.0;
-/// Breadcrumb bar height (desktop / compact).
+/// Breadcrumb bar height (desktop / compact / phone).
 pub const TOP_BAR_H: f64 = 48.0;
 pub const TOP_BAR_H_COMPACT: f64 = 40.0;
 pub const TOP_BAR_H_PHONE: f64 = 44.0;
-/// Gap below the top bar.
-pub const TOP_GAP: f64 = 10.0;
-/// Carousel card height: ideal and minimum.
-pub const CARD_H: f64 = 192.0;
+/// Sub-view tab bar height (`36px` across viewports).
+pub const SUBVIEW_BAR_H: f64 = 36.0;
+/// Vertical gap between `top_bar`, `subview_bar`, and `active_canvas`.
+pub const SUBVIEW_GAP: f64 = 6.0;
+pub const SUBVIEW_GAP_COMPACT: f64 = 4.0;
+/// Scorecard height inside `CiSubView::Scorecards`.
+pub const CARD_H: f64 = 184.0;
 pub const CARD_H_MIN: f64 = 132.0;
-/// Page-dot band below the cards.
-pub const DOTS_H: f64 = 26.0;
 pub const CARD_GAP: f64 = 12.0;
-/// Rotary reference size.
-pub const ROTARY_W: f64 = 302.0;
-pub const ROTARY_H: f64 = 192.0;
-/// CAROUSEL switch plate width (Wide).
-pub const CAROUSEL_SWITCH_W: f64 = 92.0;
-/// Narrowest useful twin-CRT card.
 pub const CARD_MIN_W: f64 = 220.0;
-/// Gap between Trainway and Delivery.
-pub const PANEL_GAP: f64 = 8.0;
-/// Delivery share of the dashboard width (506 of 1404 px at 1512 wide).
-pub const DELIVERY_RATIO: f64 = 506.0 / 1404.0;
-/// Medium: Delivery collapses to the gate summary.
-pub const DELIVERY_RATIO_MEDIUM: f64 = 0.30;
-pub const DELIVERY_MIN_W: f64 = 280.0;
-/// Minimum dashboard height before cards shrink.
-pub const DASH_MIN_WIDE: f64 = 440.0;
-pub const DASH_MIN_MEDIUM: f64 = 300.0;
-/// Phone: card height, bottom selector strip, gaps.
-pub const PHONE_CARD_H: f64 = 168.0;
+/// Phone bottom selector strip height and gap.
 pub const PHONE_NAV_H: f64 = 60.0;
-pub const PHONE_GAP: f64 = 8.0;
-/// Phone: hide the card when the dashboard would be shorter than this.
-pub const PHONE_PANEL_MIN: f64 = 200.0;
+pub const PHONE_GAP: f64 = 6.0;
 
 const PANEL_GRID: GridSpec = GridSpec {
     design_px: 16.0,
@@ -289,10 +286,65 @@ fn card(
     }
 }
 
-/// Desktop card: LCD name strip on top, twin CRTs below (reference 324×192
-/// gives two 140×132 screens).
-fn desktop_card(plate: Rect, font: &CrtFontMetrics) -> Card {
-    card(plate, 42.0, 18.0, 16.0, 12.0, CARD_GRID, font)
+/// Desktop card: header strip on top, twin CRTs below.
+#[must_use]
+pub fn desktop_card(plate: Rect, font: &CrtFontMetrics) -> Card {
+    card(plate, 38.0, 14.0, 14.0, 10.0, CARD_GRID, font)
+}
+
+/// Compute a responsive grid of twin-CRT repository scorecard plates inside `area`.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+)]
+pub fn scorecard_cards(
+    area: Rect,
+    bp: Breakpoint,
+    count: usize,
+    font: &CrtFontMetrics,
+) -> Vec<Card> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let cols = match bp {
+        Breakpoint::Wide => 3,
+        Breakpoint::Medium | Breakpoint::CompactLandscape => 2,
+        Breakpoint::Phone => 1,
+    }
+    .min(count)
+    .max(1);
+    let rows = count.div_ceil(cols).max(1);
+    let pad = 12.0;
+    let inner = area.inset(pad, pad, pad, pad);
+    let card_w = ((inner.w - CARD_GAP * (cols.saturating_sub(1)) as f64) / cols as f64)
+        .floor()
+        .max(120.0);
+    let avail_h = ((inner.h - CARD_GAP * (rows.saturating_sub(1)) as f64) / rows as f64)
+        .floor()
+        .clamp(CARD_H_MIN, CARD_H);
+    let spec = match bp {
+        Breakpoint::Wide | Breakpoint::Medium => CARD_GRID,
+        Breakpoint::CompactLandscape | Breakpoint::Phone => phone_grid(CARD_GRID, 14.0),
+    };
+    (0..count)
+        .map(|idx| {
+            let col = idx % cols;
+            let row = idx / cols;
+            let x = inner.x + col as f64 * (card_w + CARD_GAP);
+            let y = inner.y + row as f64 * (avail_h + CARD_GAP);
+            card(
+                Rect::new(x, y, card_w, avail_h),
+                36.0,
+                12.0,
+                12.0,
+                10.0,
+                spec,
+                font,
+            )
+        })
+        .collect()
 }
 
 fn panel(
@@ -313,157 +365,40 @@ fn panel(
     }
 }
 
-/// Plate → CRT insets: header strip with title, LCDs and switches.
-const TRAINWAY_INSETS: (f64, f64, f64, f64) = (22.0, 64.0, 22.0, 24.0);
-const DELIVERY_INSETS: (f64, f64, f64, f64) = (22.0, 74.0, 22.0, 24.0);
-const COMPACT_INSETS: (f64, f64, f64, f64) = (14.0, 44.0, 14.0, 14.0);
-const PHONE_INSETS: (f64, f64, f64, f64) = (12.0, 40.0, 12.0, 12.0);
+/// Plate -> CRT insets: header strip with title, filters and actions.
+const CANVAS_INSETS: (f64, f64, f64, f64) = (18.0, 52.0, 18.0, 18.0);
+const COMPACT_INSETS: (f64, f64, f64, f64) = (12.0, 40.0, 12.0, 12.0);
+const PHONE_INSETS: (f64, f64, f64, f64) = (10.0, 36.0, 10.0, 10.0);
 
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
-fn cards_fitting(width: f64, max: usize) -> usize {
-    let n = ((width + CARD_GAP) / (CARD_MIN_W + CARD_GAP)).floor();
-    if n.is_finite() && n >= 1.0 {
-        (n as usize).min(max)
-    } else {
-        0
-    }
-}
-
-#[allow(clippy::cast_precision_loss)]
-fn row_of_cards(x: f64, y: f64, width: f64, h: f64, n: usize, font: &CrtFontMetrics) -> Vec<Card> {
-    if n == 0 {
-        return Vec::new();
-    }
-    let w = ((width - CARD_GAP * (n - 1) as f64) / n as f64).floor();
-    (0..n)
-        .map(|i| desktop_card(Rect::new(x + i as f64 * (w + CARD_GAP), y, w, h), font))
-        .collect()
-}
-
-/// Wide and Medium share the vertical stack; they differ in the carousel
-/// row and the dashboard split.
 fn solve_desktop(c: Rect, bp: Breakpoint, area: Area, font: &CrtFontMetrics) -> Frames {
-    let wide = bp == Breakpoint::Wide;
     let nav = Rect::new(c.x + MARGIN, c.y + MARGIN, RAIL_W, c.h - 2.0 * MARGIN);
     let x0 = nav.right() + RAIL_GAP;
     let x1 = c.right() - MARGIN;
-    let cw = x1 - x0;
+    let cw = (x1 - x0).max(0.0);
     let top_bar = Rect::new(x0, c.y + MARGIN, cw, TOP_BAR_H);
-    let fixed = MARGIN + TOP_BAR_H + TOP_GAP + DOTS_H + MARGIN;
-    let dash_min = if wide { DASH_MIN_WIDE } else { DASH_MIN_MEDIUM };
-    let card_h = (c.h - fixed - dash_min).clamp(CARD_H_MIN, CARD_H);
-    let row_y = top_bar.bottom() + TOP_GAP;
-
-    // Carousel row, right to left: rotary, (switch), cards.
-    let rotary_w = ROTARY_W * card_h / ROTARY_H;
-    let mut right = x1;
-    let mut rotary = Some(Rect::new(right - rotary_w, row_y, rotary_w, card_h));
-    right -= rotary_w + 10.0;
-    let mut switch = None;
-    if wide {
-        switch = Some(Rect::new(
-            right - CAROUSEL_SWITCH_W,
-            row_y,
-            CAROUSEL_SWITCH_W,
-            card_h,
-        ));
-        right -= CAROUSEL_SWITCH_W + CARD_GAP;
-    }
-    let max_cards = if wide { 3 } else { 2 };
-    let mut n = cards_fitting(right - x0, max_cards);
-    if n == 0 {
-        // Too narrow for a card next to the rotary: the rotary moves to a
-        // sheet opened from the top bar.
-        rotary = None;
-        right = x1;
-        n = cards_fitting(right - x0, max_cards).max(1);
-    }
-    let cards_w = right - x0;
-    let cards = row_of_cards(x0, row_y, cards_w, card_h, n, font);
-    let dots = Rect::new(x0, row_y + card_h, cards_w, DOTS_H);
-    let carousel = Carousel {
-        cards,
-        switch,
-        dots,
-    };
-
-    let dash_y = dots.bottom();
-    let dash_h = c.bottom() - MARGIN - dash_y;
-    let panels = if area == Area::Fleet {
-        vec![panel(
-            PanelKind::Fleet,
-            0,
-            Rect::new(x0, dash_y, cw, dash_h),
-            TRAINWAY_INSETS,
-            PANEL_GRID,
-            font,
-        )]
-    } else {
-        let ratio = if wide {
-            DELIVERY_RATIO
-        } else {
-            DELIVERY_RATIO_MEDIUM
-        };
-        let delivery_w = ((cw - PANEL_GAP) * ratio)
-            .round()
-            .max(DELIVERY_MIN_W)
-            .min((cw - PANEL_GAP) / 2.0);
-        let trainway_w = cw - PANEL_GAP - delivery_w;
-        vec![
-            panel(
-                PanelKind::Trainway,
-                0,
-                Rect::new(x0, dash_y, trainway_w, dash_h),
-                TRAINWAY_INSETS,
-                PANEL_GRID,
-                font,
-            ),
-            panel(
-                PanelKind::Delivery,
-                0,
-                Rect::new(x0 + trainway_w + PANEL_GAP, dash_y, delivery_w, dash_h),
-                DELIVERY_INSETS,
-                PANEL_GRID,
-                font,
-            ),
-        ]
-    };
+    let subview_bar = Rect::new(x0, top_bar.bottom() + SUBVIEW_GAP, cw, SUBVIEW_BAR_H);
+    let dash_y = subview_bar.bottom() + SUBVIEW_GAP;
+    let dash_h = (c.bottom() - MARGIN - dash_y).max(0.0);
+    let active_canvas = Rect::new(x0, dash_y, cw, dash_h);
+    let panels = vec![panel(
+        PanelKind::for_area(area),
+        0,
+        active_canvas,
+        CANVAS_INSETS,
+        PANEL_GRID,
+        font,
+    )];
     Frames {
         breakpoint: bp,
         canvas: c,
         nav,
         top_bar,
-        carousel: Some(carousel),
-        rotary,
+        subview_bar,
+        active_canvas,
+        carousel: None,
+        rotary: None,
         panels,
         pages: 1,
-    }
-}
-
-fn paged_panels(
-    plate: Rect,
-    area: Area,
-    insets: (f64, f64, f64, f64),
-    spec: GridSpec,
-    font: &CrtFontMetrics,
-) -> (Vec<Panel>, u32) {
-    if area == Area::Fleet {
-        (
-            vec![panel(PanelKind::Fleet, 0, plate, insets, spec, font)],
-            1,
-        )
-    } else {
-        (
-            vec![
-                panel(PanelKind::Trainway, 0, plate, insets, spec, font),
-                panel(PanelKind::Delivery, 1, plate, insets, spec, font),
-            ],
-            2,
-        )
     }
 }
 
@@ -475,71 +410,72 @@ fn solve_compact(c: Rect, area: Area, font: &CrtFontMetrics) -> Frames {
         c.h - 2.0 * MARGIN,
     );
     let x0 = nav.right() + RAIL_GAP;
-    let cw = c.right() - MARGIN - x0;
+    let cw = (c.right() - MARGIN - x0).max(0.0);
     let top_bar = Rect::new(x0, c.y + MARGIN, cw, TOP_BAR_H_COMPACT);
-    let y = top_bar.bottom() + PHONE_GAP;
-    let plate = Rect::new(x0, y, cw, c.bottom() - MARGIN - y);
-    let (panels, pages) = paged_panels(
-        plate,
-        area,
+    let subview_bar = Rect::new(
+        x0,
+        top_bar.bottom() + SUBVIEW_GAP_COMPACT,
+        cw,
+        SUBVIEW_BAR_H,
+    );
+    let dash_y = subview_bar.bottom() + SUBVIEW_GAP_COMPACT;
+    let dash_h = (c.bottom() - MARGIN - dash_y).max(0.0);
+    let active_canvas = Rect::new(x0, dash_y, cw, dash_h);
+    let panels = vec![panel(
+        PanelKind::for_area(area),
+        0,
+        active_canvas,
         COMPACT_INSETS,
         phone_grid(PANEL_GRID, 15.0),
         font,
-    );
+    )];
     Frames {
         breakpoint: Breakpoint::CompactLandscape,
         canvas: c,
         nav,
         top_bar,
+        subview_bar,
+        active_canvas,
         carousel: None,
         rotary: None,
         panels,
-        pages,
+        pages: 1,
     }
 }
 
 fn solve_phone(c: Rect, area: Area, font: &CrtFontMetrics) -> Frames {
     let x0 = c.x + MARGIN;
-    let cw = c.w - 2.0 * MARGIN;
+    let cw = (c.w - 2.0 * MARGIN).max(0.0);
     let top_bar = Rect::new(x0, c.y + MARGIN, cw, TOP_BAR_H_PHONE);
+    let subview_bar = Rect::new(
+        x0,
+        top_bar.bottom() + SUBVIEW_GAP_COMPACT,
+        cw,
+        SUBVIEW_BAR_H,
+    );
     let nav = Rect::new(x0, c.bottom() - MARGIN - PHONE_NAV_H, cw, PHONE_NAV_H);
-    let mut y = top_bar.bottom() + PHONE_GAP;
-    let with_card = nav.y - PHONE_GAP - (y + PHONE_CARD_H + PHONE_GAP) >= PHONE_PANEL_MIN;
-    let carousel = with_card.then(|| {
-        let plate = Rect::new(x0, y, cw, PHONE_CARD_H);
-        y = plate.bottom() + PHONE_GAP;
-        let card = card(
-            plate,
-            34.0,
-            22.0,
-            12.0,
-            10.0,
-            phone_grid(CARD_GRID, 15.0),
-            font,
-        );
-        Carousel {
-            cards: vec![card],
-            switch: None,
-            dots: Rect::new(plate.x, plate.bottom() - 20.0, plate.w, 20.0),
-        }
-    });
-    let plate = Rect::new(x0, y, cw, nav.y - PHONE_GAP - y);
-    let (panels, pages) = paged_panels(
-        plate,
-        area,
+    let dash_y = subview_bar.bottom() + SUBVIEW_GAP_COMPACT;
+    let dash_h = (nav.y - PHONE_GAP - dash_y).max(0.0);
+    let active_canvas = Rect::new(x0, dash_y, cw, dash_h);
+    let panels = vec![panel(
+        PanelKind::for_area(area),
+        0,
+        active_canvas,
         PHONE_INSETS,
         phone_grid(PANEL_GRID, 16.0),
         font,
-    );
+    )];
     Frames {
         breakpoint: Breakpoint::Phone,
         canvas: c,
         nav,
         top_bar,
-        carousel,
+        subview_bar,
+        active_canvas,
+        carousel: None,
         rotary: None,
         panels,
-        pages,
+        pages: 1,
     }
 }
 

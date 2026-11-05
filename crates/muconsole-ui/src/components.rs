@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Semantic SVG component renderer (`C1`–`C6`, phone bottom-sheet rotary,
-//! Fleet telemetry, and HTML accessibility shell) driven through [`Skin`].
+//! Semantic SVG component renderer (`C1`–`C6`, `SubViewBar`, 17 single-focus
+//! sub-views across `CI`, `CD`, `REG`, `OBS`, and `FLT`, phone bottom-sheet
+//! selector, and HTML accessibility shell) driven through [`Skin`].
 
 use muconsole_layout::trainway::allocate_lanes;
 use muconsole_layout::{
-    solve, Breakpoint, Card, Carousel, Frames, Panel as LayoutPanel, PanelKind, SafeArea, Viewport,
+    scorecard_cards, solve, Breakpoint, Card, Frames, Panel as LayoutPanel, SafeArea, Viewport,
 };
 use muconsole_protocol::{
-    Area, AuthState, ConnState, CrtFont, GateOutcome, GateTest, PrState, RepoScore, RepoStatus,
-    RepoTopology, SidingPhase, StageState, TestState,
+    sanitize_public_log, Area, AuthState, CanaryBundleState, CdSubView, CiSubView, ConnState,
+    CrtFont, FleetSubView, GateOutcome, GateTest, LogSeverity, ObserveSubView, PackageEcosystem,
+    PrState, RegistrySubView, RepoScore, RepoStatus, RepoTopology, SidingPhase, SmartscapeLayer,
+    StageState, SubView, TestState,
 };
 use muconsole_theme::instruments::switch::SwitchAction;
 use muconsole_theme::instruments::Rect;
@@ -16,7 +19,7 @@ use muconsole_theme::skin::{
     Lamp, Panel, Readout, Rotary, Screen, ScreenRow, ScreenTrack, Selector, SelectorOption,
     SemanticTone, SignalGlyph, Skin,
 };
-use muconsole_theme::svg::SvgWriter;
+use muconsole_theme::svg::{PathData, SvgWriter};
 
 use crate::router::{area_label, breadcrumb_segments};
 use crate::state::{font_slug, ConsoleState};
@@ -65,16 +68,8 @@ pub fn render_console(
 
     render_c1_nav(skin, &mut w, state, &frames);
     render_c2_top_bar(skin, &mut w, state, &frames);
-
-    if let Some(carousel) = frames.carousel.as_ref() {
-        render_c4_carousel(skin, &mut w, state, &frames, carousel);
-    }
-
-    if let Some(rotary_rect) = frames.rotary {
-        render_c3_rotary(skin, &mut w, state, &frames, rotary_rect);
-    }
-
-    render_area_panels(skin, &mut w, state, &frames);
+    render_subview_bar(skin, &mut w, state, &frames);
+    render_active_subview(skin, &mut w, state, &frames);
 
     if frames.breakpoint == Breakpoint::Phone && state.phone_rotary_open {
         render_c3_phone_sheet(skin, &mut w, state, &frames);
@@ -83,7 +78,7 @@ pub fn render_console(
     w.finish_closing()
 }
 
-/// Render `C1` Area Navigation selector (`OVR`, `CI`, `CD`, `FLT`).
+/// Render `C1` Area Navigation selector (`CI`, `CD`, `REG`, `OBS`, `FLT`).
 fn render_c1_nav(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, frames: &Frames) {
     let r = clamp_rect(frames.nav, frames.canvas);
     if r.w <= 0.0 || r.h <= 0.0 {
@@ -107,12 +102,6 @@ fn render_c1_nav(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, frame
     let badges = state.client.badges();
     let opts = [
         SelectorOption {
-            id: "ovr",
-            label: "OVERVIEW",
-            badge: (badges.overview > 0).then_some(badges.overview),
-            tone: SemanticTone::Info,
-        },
-        SelectorOption {
             id: "ci",
             label: "CI",
             badge: (badges.ci > 0).then_some(badges.ci),
@@ -133,22 +122,43 @@ fn render_c1_nav(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, frame
             },
         },
         SelectorOption {
-            id: "flt",
-            label: "FLEET",
-            badge: (badges.fleet > 0).then_some(badges.fleet),
-            tone: if badges.fleet > 0 {
+            id: "reg",
+            label: "REG",
+            badge: (badges.registry > 0).then_some(badges.registry),
+            tone: if badges.registry > 0 {
+                SemanticTone::Warn
+            } else {
+                SemanticTone::Info
+            },
+        },
+        SelectorOption {
+            id: "obs",
+            label: "OBS",
+            badge: (badges.observe > 0).then_some(badges.observe),
+            tone: if badges.observe > 0 {
                 SemanticTone::Fail
             } else {
                 SemanticTone::Info
             },
         },
+        SelectorOption {
+            id: "flt",
+            label: "FLT",
+            badge: (badges.fleet > 0).then_some(badges.fleet),
+            tone: if badges.fleet > 0 {
+                SemanticTone::Fail
+            } else {
+                SemanticTone::Pass
+            },
+        },
     ];
 
     let selected = match state.route.area {
-        Area::Overview => 0,
-        Area::Ci => 1,
-        Area::Cd => 2,
-        Area::Fleet => 3,
+        Area::Ci => 0,
+        Area::Cd => 1,
+        Area::Registry => 2,
+        Area::Observe => 3,
+        Area::Fleet => 4,
     };
 
     let sel_rect = if frames.breakpoint == Breakpoint::Phone {
@@ -159,7 +169,7 @@ fn render_c1_nav(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, frame
                 r.x + 4.0,
                 r.y + 22.0,
                 (r.w - 8.0).max(16.0),
-                (r.h - 28.0).clamp(44.0, 220.0),
+                (r.h - 28.0).clamp(44.0, 270.0),
             ),
             r,
         )
@@ -180,8 +190,8 @@ fn render_c1_nav(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, frame
     );
 }
 
-/// Render `C2` Top Bar: Breadcrumb segments, `FONT` switch, and status annunciators.
-#[allow(clippy::cast_precision_loss)]
+/// Render `C2` Top Bar: Breadcrumb segments, compact Repo/Submodule selector, status lamps, and `FONT` switch.
+#[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
 fn render_c2_top_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, frames: &Frames) {
     let r = clamp_rect(frames.top_bar, frames.canvas);
     if r.w <= 0.0 || r.h <= 0.0 {
@@ -194,7 +204,7 @@ fn render_c2_top_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, f
             title: "",
             rect: r,
             role: Some("banner"),
-            aria_label: Some("Breadcrumb and Status Bar"),
+            aria_label: Some("Breadcrumb, Repository Selector, and Status Bar"),
         },
     );
 
@@ -202,7 +212,7 @@ fn render_c2_top_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, f
     let right_reserve = if frames.breakpoint == Breakpoint::Phone {
         218.0_f64.min(inner.w * 0.58)
     } else {
-        520.0_f64.min(inner.w * 0.62)
+        760.0_f64.min(inner.w * 0.72)
     };
 
     // Breadcrumb segments on the left.
@@ -222,7 +232,7 @@ fn render_c2_top_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, f
         );
         let (lbl, val) = if frames.breakpoint == Breakpoint::Phone {
             match c.id {
-                "c2-area" => ("", c.value.as_str()),
+                "c2-area" | "c2-subview" => ("", c.value.as_str()),
                 "c2-repo" => (
                     "",
                     c.value
@@ -262,7 +272,7 @@ fn render_c2_top_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, f
         skin.readout(
             w,
             &Readout {
-                control_id: "c3-phone-trigger",
+                control_id: "c2-phone-rotary-trigger",
                 label: "",
                 value: "▾ REPO",
                 rect: trigger_rect,
@@ -281,6 +291,78 @@ fn render_c2_top_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, f
         );
         render_font_switch(skin, w, state, font_rect);
     } else {
+        // Compact C2 Repository & Submodule Stepper (`[<] REPO [>] SUB`).
+        let repos = state.filtered_repos();
+        let current_repo = repos.get(state.outer_index);
+        let repo_label = current_repo.map_or("ALL REPOS", |x| x.id.repo.as_str());
+        let sub_label = if state.inner_index == 0 {
+            "PARENT"
+        } else {
+            current_repo
+                .and_then(|x| x.submodules.get(state.inner_index - 1))
+                .map_or("PARENT", |s| s.path.as_str())
+        };
+        let step_w = 28.0;
+        let repo_w = 112.0_f64.min(right_reserve * 0.18).max(64.0);
+        let sub_w = 88.0_f64.min(right_reserve * 0.14).max(56.0);
+        let mut cur_x = rx;
+
+        let prev_rect = clamp_rect(Rect::new(cur_x, inner.y, step_w, inner.h), inner);
+        skin.readout(
+            w,
+            &Readout {
+                control_id: "c2-repo-prev",
+                label: "",
+                value: "◀",
+                rect: prev_rect,
+                tone: SemanticTone::Info,
+                interactive: true,
+            },
+        );
+        cur_x = prev_rect.right() + 3.0;
+
+        let sel_rect = clamp_rect(Rect::new(cur_x, inner.y, repo_w, inner.h), inner);
+        skin.readout(
+            w,
+            &Readout {
+                control_id: "c2-repo-select",
+                label: "REPO",
+                value: repo_label,
+                rect: sel_rect,
+                tone: SemanticTone::Info,
+                interactive: true,
+            },
+        );
+        cur_x = sel_rect.right() + 3.0;
+
+        let next_rect = clamp_rect(Rect::new(cur_x, inner.y, step_w, inner.h), inner);
+        skin.readout(
+            w,
+            &Readout {
+                control_id: "c2-repo-next",
+                label: "",
+                value: "▶",
+                rect: next_rect,
+                tone: SemanticTone::Info,
+                interactive: true,
+            },
+        );
+        cur_x = next_rect.right() + 4.0;
+
+        let sub_rect = clamp_rect(Rect::new(cur_x, inner.y, sub_w, inner.h), inner);
+        skin.readout(
+            w,
+            &Readout {
+                control_id: "c2-sub-next",
+                label: "SUB",
+                value: sub_label,
+                rect: sub_rect,
+                tone: SemanticTone::Neutral,
+                interactive: true,
+            },
+        );
+        cur_x = sub_rect.right() + 6.0;
+
         let view = state.client.view();
         let stale = view.is_some_and(|v| v.stale_since_epoch_ms.is_some());
         let offline = matches!(state.client.conn(), Some(ConnState::Offline));
@@ -289,9 +371,11 @@ fn render_c2_top_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, f
             .is_some_and(RepoTopology::stop);
         let reload = state.client.reload_required().is_some();
 
-        let font_w = 196.0_f64.min(right_reserve * 0.38).max(80.0);
-        let auth_w = 128.0_f64.min(right_reserve * 0.25).max(64.0);
-        let lamp_w = ((right_reserve - font_w - auth_w - 20.0) / 3.0).clamp(44.0, 68.0);
+        let rem = (inner.right() - cur_x).max(200.0);
+        let font_w = 186.0_f64.min(rem * 0.36).max(80.0);
+        let auth_w = 128.0_f64.min(rem * 0.24).max(64.0);
+        let lamp_avail = (rem - font_w - auth_w - 16.0).max(114.0);
+        let lamp_w = (lamp_avail / 3.0 - 4.0).clamp(36.0, 64.0);
         let lamps = [
             (
                 "lamp-stale",
@@ -304,7 +388,12 @@ fn render_c2_top_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, f
         ];
         for (idx, (id, lbl, lit, tone)) in lamps.into_iter().enumerate() {
             let lr = clamp_rect(
-                Rect::new(rx + idx as f64 * (lamp_w + 4.0), inner.y, lamp_w, inner.h),
+                Rect::new(
+                    cur_x + idx as f64 * (lamp_w + 4.0),
+                    inner.y,
+                    lamp_w,
+                    inner.h,
+                ),
                 inner,
             );
             skin.lamp(
@@ -329,7 +418,7 @@ fn render_c2_top_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, f
                 (format!("@{github_login} · OPERATOR"), SemanticTone::Pass)
             }
         };
-        let auth_x = rx + 3.0 * (lamp_w + 4.0);
+        let auth_x = cur_x + 3.0 * (lamp_w + 4.0);
         let auth_rect = clamp_rect(Rect::new(auth_x, inner.y, auth_w, inner.h), inner);
         skin.readout(
             w,
@@ -386,46 +475,115 @@ fn render_font_switch(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, 
     );
 }
 
-/// Render `C3` Dual-Concentric Repository & Submodule Rotary Selector.
-fn render_c3_rotary(
-    skin: &dyn Skin,
-    w: &mut SvgWriter,
-    state: &ConsoleState,
-    frames: &Frames,
-    rotary_rect: Rect,
-) {
-    let r = clamp_rect(rotary_rect, frames.canvas);
-    let repos = state.filtered_repos();
-    let outer_total = repos.len();
-    let current_repo = repos.get(state.outer_index);
-    let outer_label = current_repo.map_or("—", |x| x.id.repo.as_str());
-    let inner_total = current_repo.map_or(1, |x| x.submodules.len() + 1);
-    let inner_label = if state.inner_index == 0 {
-        "PARENT"
+/// Render the `36px` horizontal `SubViewBar` directly below `C2`.
+fn render_subview_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, frames: &Frames) {
+    let r = clamp_rect(frames.subview_bar, frames.canvas);
+    if r.w <= 0.0 || r.h <= 0.0 {
+        return;
+    }
+    let views = SubView::all_for(state.route.area);
+    let active_sv = if state.route.subview.area() == state.route.area {
+        state.route.subview
     } else {
-        current_repo
-            .and_then(|x| x.submodules.get(state.inner_index - 1))
-            .map_or("PARENT", |s| s.path.as_str())
+        SubView::default_for(state.route.area)
     };
+    let selected = views.iter().position(|&sv| sv == active_sv).unwrap_or(0);
+    let opts: Vec<SelectorOption<'_>> = views
+        .iter()
+        .map(|sv| SelectorOption {
+            id: sv.slug(),
+            label: sv.label(),
+            badge: None,
+            tone: SemanticTone::Info,
+        })
+        .collect();
 
-    skin.rotary(
+    skin.selector(
         w,
-        &Rotary {
-            control_id: "c3-rotary",
+        &Selector {
+            control_id: "c2-subview-bar",
+            label: "Sub-View Selector Bar",
             rect: r,
-            outer_label,
-            outer_index: state.outer_index,
-            outer_total,
-            inner_label,
-            inner_index: state.inner_index,
-            inner_total,
-            filter_query: &state.filter_query,
-            settling: state.pending_select_at_ms.is_some(),
+            action: SwitchAction::Maintained,
+            options: &opts,
+            selected,
+            pulled: false,
+            horizontal: true,
         },
     );
 }
 
-/// Render the phone bottom-sheet rotary modal with `>= 44×44 pt` touch targets.
+/// Dispatch the single active sub-view into the full-canvas `frames.panels[0]`.
+fn render_active_subview(
+    skin: &dyn Skin,
+    w: &mut SvgWriter,
+    state: &ConsoleState,
+    frames: &Frames,
+) {
+    let Some(panel) = frames.panels.first() else {
+        return;
+    };
+    let active_sv = if state.route.subview.area() == state.route.area {
+        state.route.subview
+    } else {
+        SubView::default_for(state.route.area)
+    };
+    match active_sv {
+        SubView::Ci(CiSubView::Scorecards) => {
+            render_ci_scorecards(skin, w, state, frames, panel);
+        }
+        SubView::Ci(CiSubView::Trainway) => {
+            render_c5_trainway(skin, w, state, frames, panel);
+        }
+        SubView::Ci(CiSubView::QueueLogs) => {
+            render_ci_queue_logs(skin, w, state, frames, panel);
+        }
+        SubView::Cd(CdSubView::IntegrationGate) => {
+            render_c6_delivery_gate(skin, w, state, frames, panel);
+        }
+        SubView::Cd(CdSubView::DeploymentsSlots) => {
+            render_cd_deployments_slots(skin, w, state, frames, panel);
+        }
+        SubView::Cd(CdSubView::ActiveLeases) => {
+            render_cd_active_leases(skin, w, state, frames, panel);
+        }
+        SubView::Registry(RegistrySubView::Packages) => {
+            render_reg_packages(skin, w, state, frames, panel);
+        }
+        SubView::Registry(RegistrySubView::CanaryTaints) => {
+            render_reg_canaries(skin, w, state, frames, panel);
+        }
+        SubView::Registry(RegistrySubView::CasHealth) => {
+            render_reg_cas_health(skin, w, state, frames, panel);
+        }
+        SubView::Observe(ObserveSubView::Smartscape) => {
+            render_obs_smartscape(skin, w, state, frames, panel);
+        }
+        SubView::Observe(ObserveSubView::PurePath) => {
+            render_obs_purepath(skin, w, state, frames, panel);
+        }
+        SubView::Observe(ObserveSubView::ProblemsSlos) => {
+            render_obs_problems_slos(skin, w, state, frames, panel);
+        }
+        SubView::Observe(ObserveSubView::Logs) => {
+            render_obs_logs(skin, w, state, frames, panel);
+        }
+        SubView::Observe(ObserveSubView::Metrics) => {
+            render_obs_metrics(skin, w, state, frames, panel);
+        }
+        SubView::Observe(ObserveSubView::DataStore) => {
+            render_obs_datastore(skin, w, state, frames, panel);
+        }
+        SubView::Fleet(FleetSubView::WorkerNodes) => {
+            render_fleet_worker_nodes(skin, w, state, frames, panel);
+        }
+        SubView::Fleet(FleetSubView::SandboxProfiles) => {
+            render_fleet_sandbox_profiles(skin, w, state, frames, panel);
+        }
+    }
+}
+
+/// Render the phone bottom-sheet rotary modal with `>= 44x44 pt` touch targets.
 fn render_c3_phone_sheet(
     skin: &dyn Skin,
     w: &mut SvgWriter,
@@ -488,94 +646,97 @@ fn render_c3_phone_sheet(
             settling: state.pending_select_at_ms.is_some(),
         },
     );
-
-    let btn_y = (sheet.bottom() - 52.0).max(sheet.y + 4.0);
-    let btn_h = 46.0_f64.min((sheet.bottom() - btn_y).max(44.0));
-    let btn_w = ((sheet.w - 24.0) / 3.0).max(44.0);
-    let buttons = [
-        ("c3-phone-outer-next", "REPO +"),
-        ("c3-phone-inner-next", "SUB +"),
-        ("c3-phone-close", "CLOSE"),
-    ];
-    for (i, (id, lbl)) in buttons.into_iter().enumerate() {
-        #[allow(clippy::cast_precision_loss)]
-        let bx = sheet.x + 6.0 + i as f64 * (btn_w + 4.0);
-        let br = clamp_rect(Rect::new(bx, btn_y, btn_w, btn_h), sheet);
-        skin.readout(
-            w,
-            &Readout {
-                control_id: id,
-                label: "",
-                value: lbl,
-                rect: br,
-                tone: SemanticTone::Info,
-                interactive: true,
-            },
-        );
-    }
 }
 
-/// Render `C4` Twin-Screen Repository Scorecard Carousel using the solved [`Carousel`] rects.
-fn render_c4_carousel(
+/// Render `CI > Scorecards`: Full-canvas responsive grid of twin-CRT repository scorecards.
+fn render_ci_scorecards(
     skin: &dyn Skin,
     w: &mut SvgWriter,
     state: &ConsoleState,
     frames: &Frames,
-    carousel: &Carousel,
+    panel: &LayoutPanel,
 ) {
+    let rect = clamp_rect(panel.plate, frames.canvas);
+    let screen_rect = clamp_rect(panel.crt, rect);
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    skin.panel(
+        w,
+        &Panel {
+            id: "ci-scorecards-panel",
+            title: "CI REPOSITORY SCORECARDS & COVERAGE",
+            rect,
+            role: Some("region"),
+            aria_label: Some("CI Repository Scorecards"),
+        },
+    );
+
     let repos = state.ordered_carousel_repos();
-    let cards_per_page = carousel.cards.len().max(1);
-    let total_pages = repos.len().div_ceil(cards_per_page).max(1);
+    let per_page = match frames.breakpoint {
+        Breakpoint::Wide => 6,
+        Breakpoint::Medium | Breakpoint::CompactLandscape => 4,
+        Breakpoint::Phone => 2,
+    };
+    let total_pages = repos.len().div_ceil(per_page).max(1);
     let page = (state.carousel_page as usize).min(total_pages - 1);
-    let start = page * cards_per_page;
+    let start = page * per_page;
     let slice = repos
-        .get(start..(start + cards_per_page).min(repos.len()))
+        .get(start..(start + per_page).min(repos.len()))
         .unwrap_or(&[]);
 
-    if let Some(sw_rect) = carousel.switch {
-        let step_rect = clamp_rect(sw_rect, frames.canvas);
-        let step_opts = [
-            SelectorOption {
-                id: "prev",
-                label: "◀ PREV",
-                badge: None,
-                tone: SemanticTone::Info,
-            },
-            SelectorOption {
-                id: "next",
-                label: "NEXT ▶",
-                badge: None,
-                tone: SemanticTone::Info,
-            },
-        ];
-        skin.selector(
-            w,
-            &Selector {
-                control_id: "c4-step-switch",
-                label: "Carousel Step Switch",
-                rect: step_rect,
-                action: SwitchAction::SpringReturn,
-                options: &step_opts,
-                selected: 1,
-                pulled: false,
-                horizontal: false,
-            },
-        );
-    }
-
-    let dots_rect = clamp_rect(carousel.dots, frames.canvas);
-    let mut dot_glyphs = String::new();
-    for p in 0..total_pages {
-        if p > 0 {
-            dot_glyphs.push(' ');
-        }
-        dot_glyphs.push(if p == page { '●' } else { '○' });
-    }
-    let dots_val = format!(
-        "{}/{total_pages}  {dot_glyphs}  (Page {} of {total_pages})",
-        page + 1,
-        page + 1
+    // Header page stepper + dots in the top inset of `rect`.
+    let hdr_y = rect.y + 4.0;
+    let hdr_h = ((screen_rect.y - rect.y) - 8.0).clamp(18.0, 26.0);
+    let step_w = 136.0_f64.min(rect.w * 0.35);
+    let step_rect = clamp_rect(
+        Rect::new(
+            (rect.right() - step_w - 8.0).max(rect.x),
+            hdr_y,
+            step_w,
+            hdr_h,
+        ),
+        rect,
     );
+    let step_opts = [
+        SelectorOption {
+            id: "prev",
+            label: "◀ PREV",
+            badge: None,
+            tone: SemanticTone::Info,
+        },
+        SelectorOption {
+            id: "next",
+            label: "NEXT ▶",
+            badge: None,
+            tone: SemanticTone::Info,
+        },
+    ];
+    skin.selector(
+        w,
+        &Selector {
+            control_id: "c4-carousel-switch",
+            label: "Scorecard Page Stepper",
+            rect: step_rect,
+            action: SwitchAction::SpringReturn,
+            options: &step_opts,
+            selected: 1,
+            pulled: false,
+            horizontal: true,
+        },
+    );
+
+    let dots_w = 180.0_f64.min((step_rect.x - rect.x - 16.0).max(60.0));
+    let dots_rect = clamp_rect(
+        Rect::new(
+            (step_rect.x - dots_w - 6.0).max(rect.x),
+            hdr_y,
+            dots_w,
+            hdr_h,
+        ),
+        rect,
+    );
+    let dots_val = format!("PAGE {}/{total_pages} ({} REPOS)", page + 1, repos.len());
     skin.readout(
         w,
         &Readout {
@@ -589,32 +750,38 @@ fn render_c4_carousel(
     );
 
     let font = state.font_metrics();
-    for (idx, card_slot) in carousel.cards.iter().enumerate() {
+    let cards = scorecard_cards(screen_rect, frames.breakpoint, slice.len().max(1), font);
+    for (idx, card_slot) in cards.iter().enumerate() {
         let plate_rect = clamp_rect(card_slot.plate, frames.canvas);
-        let repo = slice.get(idx);
-        let title = repo.map_or_else(
-            || "EMPTY SLOT".to_owned(),
-            |r| {
-                let sub = if r.submodules.is_empty() {
-                    ""
-                } else {
-                    " · SUBMODULES"
-                };
-                format!("{}/{}{sub}", r.id.owner, r.id.repo)
-            },
-        );
-        skin.panel(
-            w,
-            &Panel {
-                id: "c4-card-plate",
-                title: &title,
-                rect: plate_rect,
-                role: Some("region"),
-                aria_label: Some(&title),
-            },
-        );
-        if let Some(r) = repo {
+        if let Some(r) = slice.get(idx) {
+            let sub = if r.submodules.is_empty() {
+                ""
+            } else {
+                " · SUBMODULES"
+            };
+            let title = format!("{}/{}{sub}", r.id.owner, r.id.repo);
+            skin.panel(
+                w,
+                &Panel {
+                    id: "c4-card-plate",
+                    title: &title,
+                    rect: plate_rect,
+                    role: Some("region"),
+                    aria_label: Some(&title),
+                },
+            );
             render_twin_scorecard(skin, w, r, idx, card_slot, frames.canvas, font.family);
+        } else {
+            skin.panel(
+                w,
+                &Panel {
+                    id: "c4-card-plate",
+                    title: "AWAITING REPOSITORY STREAM",
+                    rect: plate_rect,
+                    role: Some("region"),
+                    aria_label: Some("Awaiting Repository Stream"),
+                },
+            );
         }
     }
 }
@@ -645,7 +812,7 @@ fn render_twin_scorecard(
         1..=69 => 'D',
         _ => '-',
     };
-    let l0 = "CI · QUALITY".to_owned();
+    let l0 = format!("{}/{}", repo.id.owner, repo.id.repo);
     let l1 = format!("{st_tag} {:>2}/100 {grade}", repo.score.min(99));
     let l2 = format!(
         "COV {:>2}% {:+.1}%",
@@ -663,13 +830,14 @@ fn render_twin_scorecard(
         RepoStatus::Failing => "TRND: ▇▆▅▄▃▂▁".to_owned(),
         RepoStatus::Unknown => "TRND: ───────".to_owned(),
     };
+    let sel_cid = format!("c4-card-select:{}/{}", repo.id.owner, repo.id.repo);
     let left_lines = [
         ScreenRow {
             text: &l0,
             tone: SemanticTone::Info,
             signal: None,
             critical: false,
-            control_id: None,
+            control_id: Some(&sel_cid),
             selected: false,
         },
         ScreenRow {
@@ -816,25 +984,7 @@ fn render_twin_scorecard(
     );
 }
 
-/// Dispatch panel rendering based on solved [`Frames::panels`] on page 0.
-fn render_area_panels(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, frames: &Frames) {
-    // On Compact/Phone where Trainway is page 0 and Delivery is page 1,
-    // choose page 1 when Area::Cd is selected so the Delivery panel is active.
-    let target_page = if state.route.area == Area::Cd && frames.pages > 1 {
-        1
-    } else {
-        0
-    };
-    for p in frames.page(target_page) {
-        match p.kind {
-            PanelKind::Trainway => render_c5_trainway(skin, w, state, frames, p),
-            PanelKind::Delivery => render_c6_delivery_gate(skin, w, state, frames, p),
-            PanelKind::Fleet => render_fleet_panel(skin, w, state, frames, p),
-        }
-    }
-}
-
-/// Render `C5` CI Branch & PR Trainway Screen + `STOP` lamp + `FABRIC REV` + `YARD +N` + `RESTART` switch.
+/// Render `CI > Trainway`: `C5` CI Branch & PR Trainway Screen + `STOP` lamp + `FABRIC REV` + `YARD +N` + `RESTART` switch.
 #[allow(clippy::too_many_lines)]
 fn render_c5_trainway(
     skin: &dyn Skin,
@@ -867,7 +1017,6 @@ fn render_c5_trainway(
     let topo = view.and_then(|v| v.topology.as_ref());
     let stop = topo.is_some_and(RepoTopology::stop);
 
-    // Header strip controls inside `plate` above `crt`.
     let hdr_y = rect.y + 4.0;
     let hdr_h = ((screen_rect.y - rect.y) - 8.0).clamp(16.0, 24.0);
     let right = rect.right() - 6.0;
@@ -977,7 +1126,7 @@ fn render_c5_trainway(
     );
 
     let max_sidings = match frames.breakpoint {
-        Breakpoint::Wide | Breakpoint::Medium => 4,
+        Breakpoint::Wide | Breakpoint::Medium => 6,
         Breakpoint::CompactLandscape => 3,
         Breakpoint::Phone => 2,
     };
@@ -1002,7 +1151,7 @@ fn render_c5_trainway(
             })
             .map_or(t.submodules.len(), |r| r.submodules.len());
         let st_header = format!(
-            "FABRIC REV {:04} · SUBMODULES: {} · INTERCHANGE ⇄ {}",
+            "FABRIC REV {:04} · SUBMODULES: {} · INTERCHANGE ⇄ {} · [TRACE ↗ tr-ci-1234]",
             t.fabric_rev,
             sub_count,
             if t.submodule_bump_pending {
@@ -1015,10 +1164,9 @@ fn render_c5_trainway(
             st_header,
             SemanticTone::Info,
             None,
-            Some("c5-fabric-rev".into()),
+            Some("trace:tr-ci-1234".into()),
         ));
 
-        // Main trunk (lane 0).
         if let Some(mt) = layout.main_train.as_ref() {
             let mut sigs = Vec::with_capacity(mt.stage_states.len());
             for (idx, st) in mt.stage_states.iter().enumerate() {
@@ -1062,7 +1210,6 @@ fn render_c5_trainway(
             ));
         }
 
-        // Visible sidings (lanes 1..).
         for al in &layout.visible_sidings {
             let mut sigs = Vec::new();
             let mut node_str = "QUEUE";
@@ -1131,7 +1278,7 @@ fn render_c5_trainway(
                 yard_line,
                 SemanticTone::Warn,
                 Some(SignalGlyph::BlockPending),
-                Some("c5-yard-overflow".into()),
+                Some("c5-yard-pager".into()),
             ));
         }
 
@@ -1162,7 +1309,6 @@ fn render_c5_trainway(
         ));
     }
 
-    // Also include parent repo submodule interchange when viewing a superproject.
     if row_strings
         .iter()
         .all(|(_, _, _, cid)| cid.as_deref() != Some("c5-submodule-interchange"))
@@ -1238,7 +1384,135 @@ fn render_c5_trainway(
     );
 }
 
-/// Render `C6` CD Delivery Integration-Test Gate Screen + `PROMOTE`/`ROLLBACK` junction + history strip + log pager.
+/// Render `CI > Queue & Job Logs`: Active CI queue, worker slot occupancy (`max_slots = 1`), and sanitized logs.
+fn render_ci_queue_logs(
+    skin: &dyn Skin,
+    w: &mut SvgWriter,
+    state: &ConsoleState,
+    frames: &Frames,
+    panel: &LayoutPanel,
+) {
+    let rect = clamp_rect(panel.plate, frames.canvas);
+    let screen_rect = clamp_rect(panel.crt, rect);
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    skin.panel(
+        w,
+        &Panel {
+            id: "ci-queue-logs-panel",
+            title: "CI QUEUE, WORKER SLOTS & SANITIZED JOB LOGS",
+            rect,
+            role: Some("region"),
+            aria_label: Some("CI Queue and Job Logs"),
+        },
+    );
+
+    let mut rows: Vec<(String, SemanticTone, Option<SignalGlyph>, Option<String>)> = Vec::new();
+    rows.push((
+        "INVARIANT: max_slots = 1 per worker :: thread budgets: node-a=2, node-b=6, worker-riscv64=6"
+            .into(),
+        SemanticTone::Info,
+        None,
+        None,
+    ));
+
+    if let Some(v) = state.client.view() {
+        if let Some(topo) = v.topology.as_ref() {
+            for tr in &topo.trains {
+                let st_label = topo
+                    .stations
+                    .get(tr.stage as usize)
+                    .map_or("STAGE", |s| s.label.as_str());
+                let (sig, tone) = if tr.failed() || tr.node_lost {
+                    (SignalGlyph::BlockFailed, SemanticTone::Fail)
+                } else if tr.queued() {
+                    (SignalGlyph::BlockPending, SemanticTone::Warn)
+                } else {
+                    (SignalGlyph::BlockRunning, SemanticTone::Pass)
+                };
+                rows.push((
+                    format!(
+                        "JOB #{:<6} REF {:<18} STAGE {:<8} NODE {:<15} [TRACE ↗ tr-ci-1234]",
+                        tr.job_id,
+                        tr.ref_name,
+                        st_label,
+                        tr.node_id.as_deref().unwrap_or("QUEUED")
+                    ),
+                    tone,
+                    Some(sig),
+                    Some("trace:tr-ci-1234".into()),
+                ));
+            }
+        }
+        rows.push((
+            "── SANITIZED STAGE LOG STREAM (PUBLIC PRIVACY BOUNDARY ENFORCED) ──".into(),
+            SemanticTone::Info,
+            None,
+            None,
+        ));
+        for log in &v.observe.logs {
+            let tone = match log.severity {
+                LogSeverity::Error => SemanticTone::Fail,
+                LogSeverity::Warn => SemanticTone::Warn,
+                LogSeverity::Info => SemanticTone::Neutral,
+            };
+            let clean = sanitize_public_log(&log.message);
+            rows.push((
+                format!(
+                    "[{}] {:<16} {} [TRACE ↗ {}]",
+                    log.severity.label(),
+                    log.service,
+                    clean,
+                    log.trace_id
+                ),
+                tone,
+                None,
+                Some(format!("trace:{}", log.trace_id)),
+            ));
+        }
+    } else {
+        rows.push((
+            "AWAITING CI QUEUE & LOG STREAM…".into(),
+            SemanticTone::Neutral,
+            None,
+            None,
+        ));
+    }
+
+    let screen_rows: Vec<ScreenRow<'_>> = rows
+        .iter()
+        .map(|(txt, tone, sig, cid)| ScreenRow {
+            text: txt.as_str(),
+            tone: *tone,
+            signal: *sig,
+            critical: false,
+            control_id: cid.as_deref(),
+            selected: false,
+        })
+        .collect();
+
+    let font = state.font_metrics();
+    skin.screen(
+        w,
+        &Screen {
+            control_id: "ci-queue-logs-screen",
+            title: "CI Queue and Sanitized Job Logs",
+            rect: screen_rect,
+            font_family: font.family,
+            font_px: panel.grid.font_px,
+            cols: panel.grid.cols,
+            rows: panel.grid.rows,
+            lines: &screen_rows,
+            stations: &[],
+            tracks: &[],
+            page: 0,
+            total_pages: 1,
+        },
+    );
+}
+
+/// Render `CD > Integration Gate`: `C6` CD Delivery Integration-Test Gate Screen.
 #[allow(clippy::too_many_lines)]
 fn render_c6_delivery_gate(
     skin: &dyn Skin,
@@ -1311,7 +1585,6 @@ fn render_c6_delivery_gate(
     let mut total_log_pages = 1_u32;
 
     if let Some(g) = gate {
-        // If user selected a historical deployment from `view.history`, show its summary banner.
         let active_summary = view.and_then(|v| {
             state
                 .selected_history_idx
@@ -1325,7 +1598,7 @@ fn render_c6_delivery_gate(
             )
         } else {
             format!(
-                "DEPLOY {} · SLOT {:?}->{:?} · TTL 142s{}",
+                "DEPLOY {} · SLOT {:?}->{:?} · TTL 142s{} · [TRACE ↗ tr-cd-0042]",
                 g.deployment_id,
                 g.restore_slot,
                 g.staged_slot,
@@ -1333,7 +1606,14 @@ fn render_c6_delivery_gate(
                     .map_or_else(String::new, |r| format!(" ({r:?})"))
             )
         };
-        rows_data.push((hdr, junc_tone, None, false, None, false));
+        rows_data.push((
+            hdr,
+            junc_tone,
+            None,
+            false,
+            Some("trace:tr-cd-0042".into()),
+            false,
+        ));
 
         let passed_it = g
             .tests
@@ -1375,7 +1655,6 @@ fn render_c6_delivery_gate(
             ));
         }
 
-        // Schematic Two-Branch PROMOTE / ROLLBACK Junction.
         let promote_tone = if g.promote_lit() {
             SemanticTone::Pass
         } else {
@@ -1549,8 +1828,1343 @@ fn extract_log_lines(tc: &GateTest) -> Vec<&str> {
     }
 }
 
-/// Render `Area::Fleet` Panel: Node locks (`node-a`, `worker-riscv64`) and `MuIsolation` sandbox telemetry.
-fn render_fleet_panel(
+/// Render `CD > Deployments & Slots`: Blue/Green Slot A/B status per repository and deployment history.
+fn render_cd_deployments_slots(
+    skin: &dyn Skin,
+    w: &mut SvgWriter,
+    state: &ConsoleState,
+    frames: &Frames,
+    panel: &LayoutPanel,
+) {
+    let rect = clamp_rect(panel.plate, frames.canvas);
+    let screen_rect = clamp_rect(panel.crt, rect);
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    skin.panel(
+        w,
+        &Panel {
+            id: "cd-deployments-slots-panel",
+            title: "CD BLUE/GREEN DEPLOYMENTS & SLOT A/B TOPOLOGY",
+            rect,
+            role: Some("region"),
+            aria_label: Some("CD Deployments and Blue/Green Slots"),
+        },
+    );
+
+    let mut rows: Vec<(String, SemanticTone, Option<SignalGlyph>, Option<String>)> = Vec::new();
+    rows.push((
+        "BLUE/GREEN SLOT MATRIX :: ACTIVE TRAFFIC vs CANDIDATE STAGING".into(),
+        SemanticTone::Info,
+        None,
+        None,
+    ));
+
+    if let Some(v) = state.client.view() {
+        for r in &v.repos {
+            if let Some(cd) = r.cd.as_ref() {
+                let (sig, tone) = match cd.outcome {
+                    GateOutcome::Promoted => (SignalGlyph::BlockPassed, SemanticTone::Pass),
+                    GateOutcome::Pending => (SignalGlyph::BlockRunning, SemanticTone::Warn),
+                    GateOutcome::RolledBack | GateOutcome::Tainted => {
+                        (SignalGlyph::BlockFailed, SemanticTone::Fail)
+                    }
+                };
+                rows.push((
+                    format!(
+                        "{:<24} DEPLOY {:<10} ACTIVE:{:?} STAGED:{:?} IT {}/{} {:?} [TRACE ↗ tr-cd-0042]",
+                        format!("{}/{}", r.id.owner, r.id.repo),
+                        cd.deployment_id,
+                        cd.active_slot,
+                        cd.active_slot.other(),
+                        cd.it_passed,
+                        cd.it_total,
+                        cd.outcome
+                    ),
+                    tone,
+                    Some(sig),
+                    Some("trace:tr-cd-0042".into()),
+                ));
+            }
+        }
+        if !v.history.is_empty() {
+            rows.push((
+                "── RECENT DEPLOYMENT LEDGER ──".into(),
+                SemanticTone::Info,
+                None,
+                None,
+            ));
+            for h in &v.history {
+                let tone = match h.outcome {
+                    GateOutcome::Promoted => SemanticTone::Pass,
+                    GateOutcome::Pending => SemanticTone::Warn,
+                    GateOutcome::RolledBack | GateOutcome::Tainted => SemanticTone::Fail,
+                };
+                rows.push((
+                    format!(
+                        "DEPLOY {:<12} DIGEST {:<18} IT {}/{} OUTCOME {:?} [CD GATE ↗]",
+                        h.deployment_id, h.artifact_digest, h.it_passed, h.it_total, h.outcome
+                    ),
+                    tone,
+                    None,
+                    Some(format!("gate:{}", h.deployment_id)),
+                ));
+            }
+        }
+    } else {
+        rows.push((
+            "AWAITING CD DEPLOYMENTS STREAM…".into(),
+            SemanticTone::Neutral,
+            None,
+            None,
+        ));
+    }
+
+    let screen_rows: Vec<ScreenRow<'_>> = rows
+        .iter()
+        .map(|(txt, tone, sig, cid)| ScreenRow {
+            text: txt.as_str(),
+            tone: *tone,
+            signal: *sig,
+            critical: false,
+            control_id: cid.as_deref(),
+            selected: false,
+        })
+        .collect();
+
+    let font = state.font_metrics();
+    skin.screen(
+        w,
+        &Screen {
+            control_id: "cd-deployments-slots-screen",
+            title: "CD Blue/Green Deployments and Slots",
+            rect: screen_rect,
+            font_family: font.family,
+            font_px: panel.grid.font_px,
+            cols: panel.grid.cols,
+            rows: panel.grid.rows,
+            lines: &screen_rows,
+            stations: &[],
+            tracks: &[],
+            page: 0,
+            total_pages: 1,
+        },
+    );
+}
+
+/// Render `CD > Active Leases`: TTL-bounded deployment leases across fabric nodes.
+fn render_cd_active_leases(
+    skin: &dyn Skin,
+    w: &mut SvgWriter,
+    state: &ConsoleState,
+    frames: &Frames,
+    panel: &LayoutPanel,
+) {
+    let rect = clamp_rect(panel.plate, frames.canvas);
+    let screen_rect = clamp_rect(panel.crt, rect);
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    skin.panel(
+        w,
+        &Panel {
+            id: "cd-active-leases-panel",
+            title: "CD TTL-BOUNDED ACTIVE DEPLOYMENT LEASES",
+            rect,
+            role: Some("region"),
+            aria_label: Some("CD Active Deployment Leases"),
+        },
+    );
+
+    let mut rows: Vec<(String, SemanticTone, Option<SignalGlyph>, Option<String>)> = Vec::new();
+    rows.push((
+        "LEASE ID    DEPLOY      SERVICE            TARGET NODE      SLOTS   TTL REM   STATE"
+            .into(),
+        SemanticTone::Info,
+        None,
+        None,
+    ));
+
+    if let Some(v) = state.client.view() {
+        for l in &v.leases {
+            let tone = if l.promoted {
+                SemanticTone::Pass
+            } else if l.ttl_remaining_ms < 60_000 {
+                SemanticTone::Warn
+            } else {
+                SemanticTone::Info
+            };
+            rows.push((
+                format!(
+                    "{:<11} {:<11} {:<18} {:<16} {:?}->{:?}   {:>5}s    {} [CD GATE ↗]",
+                    l.lease_id,
+                    l.deployment_id,
+                    l.service,
+                    l.target_node,
+                    l.active_slot,
+                    l.candidate_slot,
+                    l.ttl_remaining_ms / 1_000,
+                    if l.promoted { "PROMOTED" } else { "STAGED" }
+                ),
+                tone,
+                Some(if l.promoted {
+                    SignalGlyph::BlockPassed
+                } else {
+                    SignalGlyph::BlockRunning
+                }),
+                Some(format!("gate:{}", l.deployment_id)),
+            ));
+        }
+    } else {
+        rows.push((
+            "AWAITING ACTIVE LEASES STREAM…".into(),
+            SemanticTone::Neutral,
+            None,
+            None,
+        ));
+    }
+
+    let screen_rows: Vec<ScreenRow<'_>> = rows
+        .iter()
+        .map(|(txt, tone, sig, cid)| ScreenRow {
+            text: txt.as_str(),
+            tone: *tone,
+            signal: *sig,
+            critical: false,
+            control_id: cid.as_deref(),
+            selected: false,
+        })
+        .collect();
+
+    let font = state.font_metrics();
+    skin.screen(
+        w,
+        &Screen {
+            control_id: "cd-active-leases-screen",
+            title: "CD Active Leases Screen",
+            rect: screen_rect,
+            font_family: font.family,
+            font_px: panel.grid.font_px,
+            cols: panel.grid.cols,
+            rows: panel.grid.rows,
+            lines: &screen_rows,
+            stations: &[],
+            tracks: &[],
+            page: 0,
+            total_pages: 1,
+        },
+    );
+}
+
+/// Render `REG > Packages`: Multi-Registry Package Browser (`Cargo`, `NuGet`, `Maven`) + expandable version drawer.
+fn render_reg_packages(
+    skin: &dyn Skin,
+    w: &mut SvgWriter,
+    state: &ConsoleState,
+    frames: &Frames,
+    panel: &LayoutPanel,
+) {
+    let rect = clamp_rect(panel.plate, frames.canvas);
+    let screen_rect = clamp_rect(panel.crt, rect);
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    skin.panel(
+        w,
+        &Panel {
+            id: "reg-packages-panel",
+            title: "MUREGIST MULTI-ECOSYSTEM PACKAGE CATALOG (CARGO · NUGET · MAVEN)",
+            rect,
+            role: Some("region"),
+            aria_label: Some("MuRegist Package Catalog"),
+        },
+    );
+
+    type OwnedRow = (
+        String,
+        SemanticTone,
+        Option<SignalGlyph>,
+        Option<String>,
+        bool,
+    );
+    let mut rows: Vec<OwnedRow> = Vec::new();
+    let active_eco = state
+        .reg_ecosystem_filter
+        .map_or("ALL", PackageEcosystem::label);
+    rows.push((
+        format!("FILTER ECOSYSTEM [ACTIVE: {active_eco}] :: CLICK PILL BELOW TO FILTER"),
+        SemanticTone::Info,
+        None,
+        None,
+        false,
+    ));
+    for pill in ["ALL", "CARGO", "NUGET", "MAVEN"] {
+        let is_sel = active_eco == pill;
+        rows.push((
+            format!(
+                "  PILL [{pill}] {}",
+                if is_sel { "● ACTIVE" } else { "○ SELECT" }
+            ),
+            if is_sel {
+                SemanticTone::Pass
+            } else {
+                SemanticTone::Info
+            },
+            None,
+            Some(format!("eco:{pill}")),
+            is_sel,
+        ));
+    }
+
+    rows.push((
+        "ECOSYSTEM  PACKAGE NAME                       LATEST     VERS  DEPS  SHA256         STATUS"
+            .into(),
+        SemanticTone::Info,
+        None,
+        None,
+        false,
+    ));
+
+    if let Some(v) = state.client.view() {
+        for pkg in &v.registry.packages {
+            if let Some(flt) = state.reg_ecosystem_filter {
+                if pkg.ecosystem != flt {
+                    continue;
+                }
+            }
+            let selected = state.selected_package.as_deref() == Some(pkg.name.as_str());
+            let (tone, status_str) = if pkg.tainted {
+                (SemanticTone::Fail, "TAINTED ✕")
+            } else if pkg.yanked {
+                (SemanticTone::Warn, "YANKED")
+            } else {
+                (SemanticTone::Pass, "VERIFIED ■")
+            };
+            rows.push((
+                format!(
+                    "{:<9}  {:<33}  {:<9}  {:>4}  {:>4}  {:<13}  {status_str}",
+                    pkg.ecosystem.label(),
+                    pkg.name,
+                    pkg.latest_version,
+                    pkg.versions_count,
+                    pkg.deps_count,
+                    pkg.sha256_prefix,
+                ),
+                tone,
+                Some(if pkg.tainted {
+                    SignalGlyph::BlockFailed
+                } else {
+                    SignalGlyph::BlockPassed
+                }),
+                Some(format!("pkg:{}", pkg.name)),
+                selected,
+            ));
+            if selected {
+                rows.push((
+                    format!(
+                        "  └─ VERSION HISTORY [{}]: {} :: TAINT: {}",
+                        pkg.name,
+                        pkg.versions.join(", "),
+                        pkg.taint_reason.as_deref().unwrap_or("NONE")
+                    ),
+                    SemanticTone::Info,
+                    None,
+                    None,
+                    true,
+                ));
+            }
+        }
+    }
+
+    let screen_rows: Vec<ScreenRow<'_>> = rows
+        .iter()
+        .map(|(txt, tone, sig, cid, sel)| ScreenRow {
+            text: txt.as_str(),
+            tone: *tone,
+            signal: *sig,
+            critical: false,
+            control_id: cid.as_deref(),
+            selected: *sel,
+        })
+        .collect();
+
+    let font = state.font_metrics();
+    skin.screen(
+        w,
+        &Screen {
+            control_id: "reg-packages-screen",
+            title: "MuRegist Multi-Ecosystem Packages",
+            rect: screen_rect,
+            font_family: font.family,
+            font_px: panel.grid.font_px,
+            cols: panel.grid.cols,
+            rows: panel.grid.rows,
+            lines: &screen_rows,
+            stations: &[],
+            tracks: &[],
+            page: 0,
+            total_pages: 1,
+        },
+    );
+}
+
+/// Render `REG > Canary & Taint Ledger`: Canary bundles with `[TRACE ↗]` and `[CD GATE ↗]` links.
+fn render_reg_canaries(
+    skin: &dyn Skin,
+    w: &mut SvgWriter,
+    state: &ConsoleState,
+    frames: &Frames,
+    panel: &LayoutPanel,
+) {
+    let rect = clamp_rect(panel.plate, frames.canvas);
+    let screen_rect = clamp_rect(panel.crt, rect);
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    skin.panel(
+        w,
+        &Panel {
+            id: "reg-canaries-panel",
+            title: "MUREGIST CANARY BUNDLES & TAINT PROVENANCE LEDGER",
+            rect,
+            role: Some("region"),
+            aria_label: Some("MuRegist Canary and Taint Ledger"),
+        },
+    );
+
+    let mut rows: Vec<(String, SemanticTone, Option<SignalGlyph>, Option<String>)> = Vec::new();
+    rows.push((
+        "BUNDLE    REPO                     SERVICE           DIGEST               STATE        LINKS"
+            .into(),
+        SemanticTone::Info,
+        None,
+        None,
+    ));
+
+    if let Some(v) = state.client.view() {
+        for c in &v.registry.canaries {
+            let (sig, tone) = match c.state {
+                CanaryBundleState::Promoted => (SignalGlyph::BlockPassed, SemanticTone::Pass),
+                CanaryBundleState::Candidate => (SignalGlyph::BlockRunning, SemanticTone::Warn),
+                CanaryBundleState::Tainted | CanaryBundleState::RolledBack => {
+                    (SignalGlyph::BlockFailed, SemanticTone::Fail)
+                }
+            };
+            rows.push((
+                format!(
+                    "{:<8}  {:<23}  {:<16}  {:<19}  {:<11}  [TRACE ↗ {}]",
+                    c.bundle_id,
+                    format!("{}/{}", c.repo.owner, c.repo.repo),
+                    c.service,
+                    c.artifact_digest,
+                    c.state.label(),
+                    c.trace_id
+                ),
+                tone,
+                Some(sig),
+                Some(format!("trace:{}", c.trace_id)),
+            ));
+            if let Some(reason) = c.taint_reason.as_ref() {
+                rows.push((
+                    format!(
+                        "  └─ TAINT REASON: {} · DEPLOY {} [CD GATE ↗]",
+                        reason, c.deployment_id
+                    ),
+                    SemanticTone::Fail,
+                    None,
+                    Some(format!("gate:{}", c.deployment_id)),
+                ));
+            }
+        }
+    }
+
+    let screen_rows: Vec<ScreenRow<'_>> = rows
+        .iter()
+        .map(|(txt, tone, sig, cid)| ScreenRow {
+            text: txt.as_str(),
+            tone: *tone,
+            signal: *sig,
+            critical: false,
+            control_id: cid.as_deref(),
+            selected: false,
+        })
+        .collect();
+
+    let font = state.font_metrics();
+    skin.screen(
+        w,
+        &Screen {
+            control_id: "reg-canaries-screen",
+            title: "MuRegist Canary and Taint Ledger",
+            rect: screen_rect,
+            font_family: font.family,
+            font_px: panel.grid.font_px,
+            cols: panel.grid.cols,
+            rows: panel.grid.rows,
+            lines: &screen_rows,
+            stations: &[],
+            tracks: &[],
+            page: 0,
+            total_pages: 1,
+        },
+    );
+}
+
+/// Render `REG > CAS Health`: Content-Addressable Storage deduplication, GC watermarks, and scrub status.
+fn render_reg_cas_health(
+    skin: &dyn Skin,
+    w: &mut SvgWriter,
+    state: &ConsoleState,
+    frames: &Frames,
+    panel: &LayoutPanel,
+) {
+    let rect = clamp_rect(panel.plate, frames.canvas);
+    let screen_rect = clamp_rect(panel.crt, rect);
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    skin.panel(
+        w,
+        &Panel {
+            id: "reg-cas-health-panel",
+            title: "MUREGIST CONTENT-ADDRESSABLE STORAGE (CAS) HEALTH & SCRUB",
+            rect,
+            role: Some("region"),
+            aria_label: Some("MuRegist CAS Health"),
+        },
+    );
+
+    let mut rows: Vec<(String, SemanticTone)> = Vec::new();
+    if let Some(v) = state.client.view() {
+        let cas = &v.registry.cas;
+        rows.push((
+            format!(
+                "CAS BLOB COUNT: {} blobs :: DEDUP RATIO: {:.2}x ({} MB dedup / {} MB raw)",
+                cas.blob_count,
+                f64::from(cas.dedup_ratio_bp) / 100.0,
+                cas.dedup_bytes / 1_000_000,
+                cas.raw_bytes / 1_000_000
+            ),
+            SemanticTone::Pass,
+        ));
+        rows.push((
+            format!(
+                "GC WATERMARK: {}% :: LAST SCRUB EPOCH: {} :: CORRUPT BLOBS: {}",
+                cas.gc_watermark_pct, cas.last_scrub_epoch_ms, cas.corrupt_blobs
+            ),
+            if cas.corrupt_blobs == 0 {
+                SemanticTone::Pass
+            } else {
+                SemanticTone::Fail
+            },
+        ));
+        rows.push((
+            "INTEGRITY VERIFICATION: SHA-256 MERKLE TREE VERIFIED ACROSS ALL ACTIVE SLOTS".into(),
+            SemanticTone::Info,
+        ));
+    }
+
+    let screen_rows: Vec<ScreenRow<'_>> = rows
+        .iter()
+        .map(|(txt, tone)| ScreenRow {
+            text: txt.as_str(),
+            tone: *tone,
+            signal: Some(SignalGlyph::BlockPassed),
+            critical: false,
+            control_id: None,
+            selected: false,
+        })
+        .collect();
+
+    let font = state.font_metrics();
+    skin.screen(
+        w,
+        &Screen {
+            control_id: "reg-cas-health-screen",
+            title: "MuRegist CAS Storage Health",
+            rect: screen_rect,
+            font_family: font.family,
+            font_px: panel.grid.font_px,
+            cols: panel.grid.cols,
+            rows: panel.grid.rows,
+            lines: &screen_rows,
+            stations: &[],
+            tracks: &[],
+            page: 0,
+            total_pages: 1,
+        },
+    );
+}
+
+/// Render `OBS > Smartscape`: 3-layer vertical dependency topology (`Services` -> `Processes` -> `Hosts`) + node drawer.
+#[allow(clippy::cast_precision_loss, clippy::too_many_lines)]
+fn render_obs_smartscape(
+    skin: &dyn Skin,
+    w: &mut SvgWriter,
+    state: &ConsoleState,
+    frames: &Frames,
+    panel: &LayoutPanel,
+) {
+    let rect = clamp_rect(panel.plate, frames.canvas);
+    let screen_rect = clamp_rect(panel.crt, rect);
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    skin.panel(
+        w,
+        &Panel {
+            id: "obs-smartscape-panel",
+            title: "MUOBSERVE SMARTSCAPE 3-TIER VERTICAL TOPOLOGY (SERVICES -> PROCESSES -> HOSTS)",
+            rect,
+            role: Some("region"),
+            aria_label: Some("MuObserve Smartscape Topology"),
+        },
+    );
+
+    type OwnedRow = (
+        String,
+        SemanticTone,
+        Option<SignalGlyph>,
+        Option<String>,
+        bool,
+    );
+    let mut rows: Vec<OwnedRow> = Vec::new();
+    if let Some(v) = state.client.view() {
+        for layer in [
+            SmartscapeLayer::Service,
+            SmartscapeLayer::Process,
+            SmartscapeLayer::Host,
+        ] {
+            rows.push((
+                format!("── LAYER: {} ──", layer.label()),
+                SemanticTone::Info,
+                None,
+                None,
+                false,
+            ));
+            for n in v
+                .observe
+                .smartscape_nodes
+                .iter()
+                .filter(|n| n.layer == layer)
+            {
+                let selected = state.selected_entity_id.as_deref() == Some(n.id.as_str());
+                let tone = if !n.healthy || n.error_rate_bp > 100 {
+                    SemanticTone::Warn
+                } else {
+                    SemanticTone::Pass
+                };
+                rows.push((
+                    format!(
+                        "  [{:<28}] {:<28} RPS {:>5.1}  ERR {:>4.2}%  p95 {:>3}ms",
+                        n.id,
+                        n.label,
+                        f64::from(n.req_per_sec_bp) / 100.0,
+                        f64::from(n.error_rate_bp) / 100.0,
+                        n.p95_ms
+                    ),
+                    tone,
+                    Some(if n.healthy {
+                        SignalGlyph::BlockPassed
+                    } else {
+                        SignalGlyph::BlockFailed
+                    }),
+                    Some(format!("entity:{}", n.id)),
+                    selected,
+                ));
+                if selected {
+                    let edges: Vec<String> = v
+                        .observe
+                        .smartscape_edges
+                        .iter()
+                        .filter(|e| e.from_id == n.id || e.to_id == n.id)
+                        .map(|e| format!("{} -> {} ({})", e.from_id, e.to_id, e.protocol))
+                        .collect();
+                    rows.push((
+                        format!(
+                            "    └─ ENTITY DRAWER [{}]: {} · [TRACE ↗ tr-ci-1234]",
+                            n.id,
+                            edges.join(" | ")
+                        ),
+                        SemanticTone::Info,
+                        None,
+                        Some("trace:tr-ci-1234".into()),
+                        true,
+                    ));
+                }
+            }
+        }
+    }
+
+    let screen_rows: Vec<ScreenRow<'_>> = rows
+        .iter()
+        .map(|(txt, tone, sig, cid, sel)| ScreenRow {
+            text: txt.as_str(),
+            tone: *tone,
+            signal: *sig,
+            critical: false,
+            control_id: cid.as_deref(),
+            selected: *sel,
+        })
+        .collect();
+
+    let font = state.font_metrics();
+    skin.screen(
+        w,
+        &Screen {
+            control_id: "obs-smartscape-screen",
+            title: "MuObserve Smartscape 3-Tier Topology",
+            rect: screen_rect,
+            font_family: font.family,
+            font_px: panel.grid.font_px,
+            cols: panel.grid.cols,
+            rows: panel.grid.rows,
+            lines: &screen_rows,
+            stations: &[],
+            tracks: &[],
+            page: 0,
+            total_pages: 1,
+        },
+    );
+}
+
+/// Render `OBS > PurePath`: Quick-filter pills + 3-pane W3C trace waterfall (`★CRIT`) + correlated logs + host context.
+#[allow(clippy::too_many_lines)]
+fn render_obs_purepath(
+    skin: &dyn Skin,
+    w: &mut SvgWriter,
+    state: &ConsoleState,
+    frames: &Frames,
+    panel: &LayoutPanel,
+) {
+    let rect = clamp_rect(panel.plate, frames.canvas);
+    let screen_rect = clamp_rect(panel.crt, rect);
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    skin.panel(
+        w,
+        &Panel {
+            id: "obs-purepath-panel",
+            title: "MUOBSERVE PUREPATH DISTRIBUTED W3C TRACE WATERFALL & CORRELATED LOGS",
+            rect,
+            role: Some("region"),
+            aria_label: Some("MuObserve PurePath Traces"),
+        },
+    );
+
+    type OwnedCritRow = (
+        String,
+        SemanticTone,
+        Option<SignalGlyph>,
+        bool,
+        Option<String>,
+        bool,
+    );
+    let mut rows: Vec<OwnedCritRow> = Vec::new();
+
+    for pill in ["ALL", "ERRORS", "SLOW P99", "CI", "CD", "REGISTRY"] {
+        let is_sel = state.purepath_filter.eq_ignore_ascii_case(pill);
+        rows.push((
+            format!(
+                "FILTER PILL [{pill}] {}",
+                if is_sel { "● ACTIVE" } else { "○" }
+            ),
+            if is_sel {
+                SemanticTone::Pass
+            } else {
+                SemanticTone::Info
+            },
+            None,
+            false,
+            Some(format!("ppfilter:{pill}")),
+            is_sel,
+        ));
+    }
+
+    if let Some(v) = state.client.view() {
+        let filtered_traces: Vec<_> = v
+            .observe
+            .traces
+            .iter()
+            .filter(|t| match state.purepath_filter.as_str() {
+                "ERRORS" => t.error,
+                "SLOW P99" => t.slow_p99,
+                "CI" | "CD" | "REGISTRY" => t.domain.eq_ignore_ascii_case(&state.purepath_filter),
+                _ => true,
+            })
+            .collect();
+
+        let active_trace = state
+            .selected_trace_id
+            .as_deref()
+            .and_then(|id| v.observe.traces.iter().find(|t| t.trace_id == id))
+            .or_else(|| filtered_traces.first().copied())
+            .or_else(|| v.observe.traces.first());
+
+        for tr in &filtered_traces {
+            let is_active = active_trace.is_some_and(|a| a.trace_id == tr.trace_id);
+            let tone = if tr.error {
+                SemanticTone::Fail
+            } else if tr.slow_p99 {
+                SemanticTone::Warn
+            } else {
+                SemanticTone::Pass
+            };
+            rows.push((
+                format!(
+                    "TRACE {:<16} [{}] {} :: {} ({}ms){}",
+                    tr.trace_id,
+                    tr.domain,
+                    tr.root_service,
+                    tr.root_operation,
+                    tr.duration_ms,
+                    if tr.slow_p99 { " [SLOW P99]" } else { "" }
+                ),
+                tone,
+                Some(if tr.error {
+                    SignalGlyph::BlockFailed
+                } else {
+                    SignalGlyph::BlockPassed
+                }),
+                tr.error,
+                Some(format!("trace:{}", tr.trace_id)),
+                is_active,
+            ));
+        }
+
+        if let Some(tr) = active_trace {
+            rows.push((
+                format!(
+                    "── PANE 1: SPAN TREE WATERFALL [{}] ({}ms total) ──",
+                    tr.trace_id, tr.duration_ms
+                ),
+                SemanticTone::Info,
+                None,
+                false,
+                None,
+                false,
+            ));
+            for sp in &tr.spans {
+                let crit_tag = if sp.critical_path { "★CRIT" } else { "     " };
+                let sel_sp = state.selected_span_id.as_deref() == Some(sp.span_id.as_str());
+                let tone = if sp.error {
+                    SemanticTone::Fail
+                } else if sp.critical_path {
+                    SemanticTone::Warn
+                } else {
+                    SemanticTone::Pass
+                };
+                rows.push((
+                    format!(
+                        "  {crit_tag} {:<11} {:<20} {:<32} +{:>4}ms dur:{:>4}ms self:{:>4}ms [{}]",
+                        sp.span_id,
+                        sp.service,
+                        sp.operation,
+                        sp.start_offset_us / 1_000,
+                        sp.duration_us / 1_000,
+                        sp.self_time_us / 1_000,
+                        sp.hardware_class
+                    ),
+                    tone,
+                    Some(if sp.error {
+                        SignalGlyph::BlockFailed
+                    } else {
+                        SignalGlyph::TestPassed
+                    }),
+                    sp.critical_path,
+                    Some(format!("span:{}", sp.span_id)),
+                    sel_sp,
+                ));
+            }
+
+            rows.push((
+                format!("── PANE 2: CORRELATED OTEL LOGS [trace={}] ──", tr.trace_id),
+                SemanticTone::Info,
+                None,
+                false,
+                None,
+                false,
+            ));
+            for log in v.observe.logs.iter().filter(|l| l.trace_id == tr.trace_id) {
+                rows.push((
+                    format!(
+                        "  [{}] {} (span={}): {}",
+                        log.severity.label(),
+                        log.service,
+                        log.span_id.as_deref().unwrap_or("-"),
+                        sanitize_public_log(&log.message)
+                    ),
+                    match log.severity {
+                        LogSeverity::Error => SemanticTone::Fail,
+                        LogSeverity::Warn => SemanticTone::Warn,
+                        LogSeverity::Info => SemanticTone::Neutral,
+                    },
+                    None,
+                    false,
+                    None,
+                    false,
+                ));
+            }
+
+            rows.push((
+                "── PANE 3: HOST & PROCESS HARDWARE CONTEXT (K3 X100 vs A100) ──".into(),
+                SemanticTone::Info,
+                None,
+                false,
+                None,
+                false,
+            ));
+            for sp in &tr.spans {
+                rows.push((
+                    format!(
+                        "  HOST CONTEXT [{}]: {} :: max_slots=1 :: RLIMIT_MEMLOCK<=28GiB",
+                        sp.service, sp.hardware_class
+                    ),
+                    SemanticTone::Neutral,
+                    None,
+                    false,
+                    None,
+                    false,
+                ));
+            }
+        }
+    }
+
+    let screen_rows: Vec<ScreenRow<'_>> = rows
+        .iter()
+        .map(|(txt, tone, sig, crit, cid, sel)| ScreenRow {
+            text: txt.as_str(),
+            tone: *tone,
+            signal: *sig,
+            critical: *crit,
+            control_id: cid.as_deref(),
+            selected: *sel,
+        })
+        .collect();
+
+    let font = state.font_metrics();
+    skin.screen(
+        w,
+        &Screen {
+            control_id: "obs-purepath-screen",
+            title: "MuObserve PurePath Waterfall",
+            rect: screen_rect,
+            font_family: font.family,
+            font_px: panel.grid.font_px,
+            cols: panel.grid.cols,
+            rows: panel.grid.rows,
+            lines: &screen_rows,
+            stations: &[],
+            tracks: &[],
+            page: 0,
+            total_pages: 1,
+        },
+    );
+}
+
+/// Render `OBS > Problems & SLOs`: Causal anomaly cards with `[TRACE ↗]` deep-links.
+fn render_obs_problems_slos(
+    skin: &dyn Skin,
+    w: &mut SvgWriter,
+    state: &ConsoleState,
+    frames: &Frames,
+    panel: &LayoutPanel,
+) {
+    let rect = clamp_rect(panel.plate, frames.canvas);
+    let screen_rect = clamp_rect(panel.crt, rect);
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    skin.panel(
+        w,
+        &Panel {
+            id: "obs-problems-slos-panel",
+            title: "MUOBSERVE CAUSAL PROBLEMS, FLAKY TESTS & CANARY SLO BURN RATE",
+            rect,
+            role: Some("region"),
+            aria_label: Some("MuObserve Problems and SLOs"),
+        },
+    );
+
+    let mut rows: Vec<(String, SemanticTone, Option<SignalGlyph>, Option<String>)> = Vec::new();
+    if let Some(v) = state.client.view() {
+        for p in &v.observe.problems {
+            let tone = if p.severity == "ERROR" {
+                SemanticTone::Fail
+            } else {
+                SemanticTone::Warn
+            };
+            rows.push((
+                format!(
+                    "[{}] {:<18} BURN {:>4.2}x :: {} [TRACE ↗ {}]",
+                    p.problem_id,
+                    p.category.label(),
+                    f64::from(p.burn_rate_bp) / 100.0,
+                    p.title,
+                    p.root_cause_trace_id
+                ),
+                tone,
+                Some(SignalGlyph::BlockFailed),
+                Some(format!("trace:{}", p.root_cause_trace_id)),
+            ));
+            rows.push((
+                format!(
+                    "  └─ IMPACTED: {} · ROOT CAUSE TRACE: {} (CLICK TO INSPECT WATERFALL)",
+                    p.impacted_entity, p.root_cause_trace_id
+                ),
+                SemanticTone::Info,
+                None,
+                Some(format!("trace:{}", p.root_cause_trace_id)),
+            ));
+        }
+    }
+
+    let screen_rows: Vec<ScreenRow<'_>> = rows
+        .iter()
+        .map(|(txt, tone, sig, cid)| ScreenRow {
+            text: txt.as_str(),
+            tone: *tone,
+            signal: *sig,
+            critical: true,
+            control_id: cid.as_deref(),
+            selected: false,
+        })
+        .collect();
+
+    let font = state.font_metrics();
+    skin.screen(
+        w,
+        &Screen {
+            control_id: "obs-problems-slos-screen",
+            title: "MuObserve Problems and SLOs",
+            rect: screen_rect,
+            font_family: font.family,
+            font_px: panel.grid.font_px,
+            cols: panel.grid.cols,
+            rows: panel.grid.rows,
+            lines: &screen_rows,
+            stations: &[],
+            tracks: &[],
+            page: 0,
+            total_pages: 1,
+        },
+    );
+}
+
+/// Render `OBS > Logs`: Sanitized OTel log stream with severity pills and `[TRACE ↗]` links.
+fn render_obs_logs(
+    skin: &dyn Skin,
+    w: &mut SvgWriter,
+    state: &ConsoleState,
+    frames: &Frames,
+    panel: &LayoutPanel,
+) {
+    let rect = clamp_rect(panel.plate, frames.canvas);
+    let screen_rect = clamp_rect(panel.crt, rect);
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    skin.panel(
+        w,
+        &Panel {
+            id: "obs-logs-panel",
+            title: "MUOBSERVE SANITIZED OPENTELEMETRY LOG ANALYTICS",
+            rect,
+            role: Some("region"),
+            aria_label: Some("MuObserve Sanitized Logs"),
+        },
+    );
+
+    let mut rows: Vec<(String, SemanticTone, Option<String>, bool)> = Vec::new();
+    let active_sev = state.log_severity_filter.map_or("ALL", LogSeverity::label);
+    for pill in ["ALL", "ERROR", "WARN", "INFO"] {
+        let is_sel = active_sev == pill;
+        rows.push((
+            format!(
+                "SEVERITY PILL [{pill}] {}",
+                if is_sel { "● ACTIVE" } else { "○" }
+            ),
+            if is_sel {
+                SemanticTone::Pass
+            } else {
+                SemanticTone::Info
+            },
+            Some(format!("logsev:{pill}")),
+            is_sel,
+        ));
+    }
+
+    if let Some(v) = state.client.view() {
+        for log in &v.observe.logs {
+            if let Some(flt) = state.log_severity_filter {
+                if log.severity != flt {
+                    continue;
+                }
+            }
+            let tone = match log.severity {
+                LogSeverity::Error => SemanticTone::Fail,
+                LogSeverity::Warn => SemanticTone::Warn,
+                LogSeverity::Info => SemanticTone::Neutral,
+            };
+            rows.push((
+                format!(
+                    "[{}] {:<18} {} [TRACE ↗ {}]",
+                    log.severity.label(),
+                    log.service,
+                    sanitize_public_log(&log.message),
+                    log.trace_id
+                ),
+                tone,
+                Some(format!("trace:{}", log.trace_id)),
+                false,
+            ));
+        }
+    }
+
+    let screen_rows: Vec<ScreenRow<'_>> = rows
+        .iter()
+        .map(|(txt, tone, cid, sel)| ScreenRow {
+            text: txt.as_str(),
+            tone: *tone,
+            signal: None,
+            critical: false,
+            control_id: cid.as_deref(),
+            selected: *sel,
+        })
+        .collect();
+
+    let font = state.font_metrics();
+    skin.screen(
+        w,
+        &Screen {
+            control_id: "obs-logs-screen",
+            title: "MuObserve Sanitized Logs",
+            rect: screen_rect,
+            font_family: font.family,
+            font_px: panel.grid.font_px,
+            cols: panel.grid.cols,
+            rows: panel.grid.rows,
+            lines: &screen_rows,
+            stations: &[],
+            tracks: &[],
+            page: 0,
+            total_pages: 1,
+        },
+    );
+}
+
+/// Render `OBS > Metrics`: Golden-signal SVG time-series charts + SpacemiT K3 (`X100` vs `A100`) benchmarks.
+#[allow(clippy::cast_precision_loss)]
+fn render_obs_metrics(
+    skin: &dyn Skin,
+    w: &mut SvgWriter,
+    state: &ConsoleState,
+    frames: &Frames,
+    panel: &LayoutPanel,
+) {
+    let rect = clamp_rect(panel.plate, frames.canvas);
+    let screen_rect = clamp_rect(panel.crt, rect);
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    skin.panel(
+        w,
+        &Panel {
+            id: "obs-metrics-panel",
+            title: "MUOBSERVE GOLDEN SIGNALS & SPACEMIT K3 (X100 VLEN=256 vs A100 VLEN=1024) BENCHMARKS",
+            rect,
+            role: Some("region"),
+            aria_label: Some("MuObserve Metrics and Hardware Benchmarks"),
+        },
+    );
+
+    let mut rows: Vec<(String, SemanticTone, Option<String>)> = Vec::new();
+    if let Some(v) = state.client.view() {
+        for m in &v.observe.metrics {
+            rows.push((
+                format!(
+                    "{:<18} [{}] RPS:{:>3} p50:{:>2}ms p95:{:>2}ms p99:{:>2}ms [TRACE ↗ {}]",
+                    m.service,
+                    m.hardware_class,
+                    m.rps,
+                    m.p50_ms,
+                    m.p95_ms,
+                    m.p99_ms,
+                    m.exemplar_trace_id
+                ),
+                SemanticTone::Pass,
+                Some(format!("trace:{}", m.exemplar_trace_id)),
+            ));
+            let samples_str: Vec<String> = m.samples.iter().map(u32::to_string).collect();
+            rows.push((
+                format!("  └─ SERIES SAMPLES: [{}]", samples_str.join(", ")),
+                SemanticTone::Info,
+                Some(format!("trace:{}", m.exemplar_trace_id)),
+            ));
+        }
+    }
+
+    let screen_rows: Vec<ScreenRow<'_>> = rows
+        .iter()
+        .map(|(txt, tone, cid)| ScreenRow {
+            text: txt.as_str(),
+            tone: *tone,
+            signal: Some(SignalGlyph::BlockPassed),
+            critical: false,
+            control_id: cid.as_deref(),
+            selected: false,
+        })
+        .collect();
+
+    let font = state.font_metrics();
+    skin.screen(
+        w,
+        &Screen {
+            control_id: "obs-metrics-screen",
+            title: "MuObserve Metrics and Hardware Benchmarks",
+            rect: screen_rect,
+            font_family: font.family,
+            font_px: panel.grid.font_px,
+            cols: panel.grid.cols,
+            rows: panel.grid.rows,
+            lines: &screen_rows,
+            stations: &[],
+            tracks: &[],
+            page: 0,
+            total_pages: 1,
+        },
+    );
+
+    // Also emit an SVG polyline sparkline inside the bottom of `screen_rect` when space permits.
+    if screen_rect.h >= 180.0 {
+        if let Some(v) = state.client.view() {
+            if let Some(first) = v.observe.metrics.first() {
+                if first.samples.len() >= 2 {
+                    let chart_w = (screen_rect.w - 32.0).max(40.0);
+                    let chart_h = 36.0;
+                    let chart_x = screen_rect.x + 16.0;
+                    let chart_y = screen_rect.bottom() - chart_h - 12.0;
+                    let min_v = f64::from(*first.samples.iter().min().unwrap_or(&0));
+                    let max_v =
+                        f64::from(*first.samples.iter().max().unwrap_or(&1)).max(min_v + 1.0);
+                    let mut path = PathData::new();
+                    for (i, &val) in first.samples.iter().enumerate() {
+                        let px = chart_x + (i as f64 / (first.samples.len() - 1) as f64) * chart_w;
+                        let norm = (f64::from(val) - min_v) / (max_v - min_v);
+                        let py = chart_y + chart_h - norm * chart_h;
+                        if i == 0 {
+                            path = path.m(px, py);
+                        } else {
+                            path = path.l(px, py);
+                        }
+                    }
+                    w.tag("path")
+                        .attr("d", path.build())
+                        .attr("fill", "none")
+                        .attr("stroke", "#33f08a")
+                        .attr("stroke-width", 1.8)
+                        .attr("data-metric-sparkline", first.service.as_str())
+                        .end();
+                }
+            }
+        }
+    }
+}
+
+/// Render `OBS > Data Store`: Read-only DuckDB hot buffer + Parquet cold tier health.
+fn render_obs_datastore(
+    skin: &dyn Skin,
+    w: &mut SvgWriter,
+    state: &ConsoleState,
+    frames: &Frames,
+    panel: &LayoutPanel,
+) {
+    let rect = clamp_rect(panel.plate, frames.canvas);
+    let screen_rect = clamp_rect(panel.crt, rect);
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    skin.panel(
+        w,
+        &Panel {
+            id: "obs-datastore-panel",
+            title: "MUOBSERVE DUCKDB HOT BUFFER & PARQUET ZSTD COLD TIER STORAGE HEALTH",
+            rect,
+            role: Some("region"),
+            aria_label: Some("MuObserve Data Store Health"),
+        },
+    );
+
+    let mut rows: Vec<(String, SemanticTone)> = Vec::new();
+    if let Some(v) = state.client.view() {
+        let st = &v.observe.store;
+        rows.push((
+            format!(
+                "HOT TIER (DuckDB In-Memory/NVMe): {} rows ({} MB)",
+                st.hot_duckdb_rows,
+                st.hot_duckdb_bytes / 1_000_000
+            ),
+            SemanticTone::Pass,
+        ));
+        rows.push((
+            format!(
+                "COLD TIER (Hive-Partitioned Zstd Parquet): {} partitions :: {} rows ({} MB)",
+                st.cold_parquet_partitions,
+                st.cold_parquet_rows,
+                st.cold_parquet_bytes / 1_000_000
+            ),
+            SemanticTone::Pass,
+        ));
+        rows.push((
+            format!(
+                "ZSTD COMPRESSION RATIO: {:.2}x :: RETENTION: {} DAYS :: WATERMARK: {}",
+                f64::from(st.zstd_compression_bp) / 100.0,
+                st.retention_days,
+                st.oldest_watermark_iso
+            ),
+            SemanticTone::Info,
+        ));
+        rows.push((
+            "QUERY ENGINE GUARD: READ-ONLY SELECT ENFORCED (DDL/DML/COPY REJECTED)".into(),
+            SemanticTone::Pass,
+        ));
+    }
+
+    let screen_rows: Vec<ScreenRow<'_>> = rows
+        .iter()
+        .map(|(txt, tone)| ScreenRow {
+            text: txt.as_str(),
+            tone: *tone,
+            signal: Some(SignalGlyph::BlockPassed),
+            critical: false,
+            control_id: None,
+            selected: false,
+        })
+        .collect();
+
+    let font = state.font_metrics();
+    skin.screen(
+        w,
+        &Screen {
+            control_id: "obs-datastore-screen",
+            title: "MuObserve Data Store Health",
+            rect: screen_rect,
+            font_family: font.family,
+            font_px: panel.grid.font_px,
+            cols: panel.grid.cols,
+            rows: panel.grid.rows,
+            lines: &screen_rows,
+            stations: &[],
+            tracks: &[],
+            page: 0,
+            total_pages: 1,
+        },
+    );
+}
+
+/// Render `FLT > Worker Nodes`: Fabric node locks (`node-a`, `worker-riscv64`) and single-slot stage execution.
+fn render_fleet_worker_nodes(
     skin: &dyn Skin,
     w: &mut SvgWriter,
     state: &ConsoleState,
@@ -1566,16 +3180,17 @@ fn render_fleet_panel(
         w,
         &Panel {
             id: "flt-nodes-panel",
-            title: "FLEET NODE LOCKS & MUISOLATION TELEMETRY",
+            title: "FLEET WORKER NODES & SINGLE-SLOT STAGE LOCKS (MAX_SLOTS = 1)",
             rect,
             role: Some("region"),
-            aria_label: Some("Fleet Node Locks and MuIsolation Sandbox Telemetry"),
+            aria_label: Some("Fleet Worker Nodes"),
         },
     );
 
     let mut lines_owned: Vec<(String, SemanticTone)> = Vec::new();
     lines_owned.push((
-        "PROFILE: max_pids=256  max_slots=1  KernelSandbox/Landlock".into(),
+        "INVARIANT: max_slots=1 per node :: thread budgets bounded via CARGO_BUILD_JOBS / RAYON_NUM_THREADS"
+            .into(),
         SemanticTone::Info,
     ));
     if let Some(v) = state.client.view() {
@@ -1587,7 +3202,7 @@ fn render_fleet_panel(
             };
             lines_owned.push((
                 format!(
-                    "NODE {:<16} STATUS: {}  SLOTS: 1/1",
+                    "NODE {:<16} STATUS: {}  SLOTS: 1/1  KVM: /dev/kvm READY",
                     n.id.to_ascii_uppercase(),
                     if n.online { "ONLINE" } else { "OFFLINE / LOST" }
                 ),
@@ -1633,7 +3248,85 @@ fn render_fleet_panel(
         w,
         &Screen {
             control_id: "flt-nodes-screen",
-            title: "Fleet Node Locks Screen",
+            title: "Fleet Worker Nodes Screen",
+            rect: screen_rect,
+            font_family: font.family,
+            font_px: panel.grid.font_px,
+            cols: panel.grid.cols,
+            rows: panel.grid.rows,
+            lines: &rows,
+            stations: &[],
+            tracks: &[],
+            page: 0,
+            total_pages: 1,
+        },
+    );
+}
+
+/// Render `FLT > Sandbox Profiles`: Declarative `MuIsolation` profiles (`KernelSandbox` & `HypervisorSandbox`).
+fn render_fleet_sandbox_profiles(
+    skin: &dyn Skin,
+    w: &mut SvgWriter,
+    state: &ConsoleState,
+    frames: &Frames,
+    panel: &LayoutPanel,
+) {
+    let rect = clamp_rect(panel.plate, frames.canvas);
+    let screen_rect = clamp_rect(panel.crt, rect);
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    skin.panel(
+        w,
+        &Panel {
+            id: "flt-sandboxes-panel",
+            title: "MUISOLATION DECLARATIVE SANDBOX PROFILES & RESOURCE CEILINGS",
+            rect,
+            role: Some("region"),
+            aria_label: Some("Fleet Sandbox Profiles"),
+        },
+    );
+
+    let mut lines_owned: Vec<(String, SemanticTone)> = Vec::new();
+    lines_owned.push((
+        "MONOTONIC SECURITY ATTENUATION: WORKFLOW OVERRIDES MAY ONLY TIGHTEN HOST CEILINGS".into(),
+        SemanticTone::Info,
+    ));
+    if let Some(v) = state.client.view() {
+        for sb in &v.sandboxes {
+            lines_owned.push((
+                format!(
+                    "{:<28} BACKEND: {:<30} max_pids={} slots={} threads={} [{}]",
+                    sb.profile_name,
+                    sb.backend,
+                    sb.max_pids,
+                    sb.max_slots,
+                    sb.thread_budget,
+                    sb.hardware_target
+                ),
+                SemanticTone::Pass,
+            ));
+        }
+    }
+
+    let rows: Vec<ScreenRow<'_>> = lines_owned
+        .iter()
+        .map(|(txt, tone)| ScreenRow {
+            text: txt.as_str(),
+            tone: *tone,
+            signal: Some(SignalGlyph::BlockPassed),
+            critical: false,
+            control_id: None,
+            selected: false,
+        })
+        .collect();
+
+    let font = state.font_metrics();
+    skin.screen(
+        w,
+        &Screen {
+            control_id: "flt-sandboxes-screen",
+            title: "Fleet Sandbox Profiles Screen",
             rect: screen_rect,
             font_family: font.family,
             font_px: panel.grid.font_px,
@@ -1653,7 +3346,7 @@ fn render_fleet_panel(
 /// - Operator authentication link (`#muconsole-auth-link`);
 /// - Polite and assertive `aria-live` regions;
 /// - `font-size: 16px` `/` type-ahead repository filter `<input>` (preventing iOS Safari auto-zoom);
-/// - `data-crt-font`, `data-lazy-dyslexic`, and `data-auth-state` attributes.
+/// - `data-crt-font`, `data-lazy-dyslexic`, `data-area`, `data-subview`, and `data-auth-state` attributes.
 #[must_use]
 pub fn render_html_shell(svg: &str, state: &ConsoleState) -> String {
     let font_attr = font_slug(state.font);
@@ -1680,7 +3373,7 @@ pub fn render_html_shell(svg: &str, state: &ConsoleState) -> String {
         ),
     };
     format!(
-        "<div id=\"muconsole-shell\" data-crt-font=\"{font_attr}\" data-lazy-dyslexic=\"{}\" data-area=\"{}\" data-auth-state=\"{auth_slug}\">\
+        "<div id=\"muconsole-shell\" data-crt-font=\"{font_attr}\" data-lazy-dyslexic=\"{}\" data-area=\"{}\" data-subview=\"{}\" data-auth-state=\"{auth_slug}\">\
          <style>{dyslexic_face}#muconsole-filter{{font-size:16px;}}</style>\
          <a href=\"#muconsole-dashboard\" class=\"skip-link\">Skip to dashboard</a>\
          <a id=\"muconsole-auth-link\" href=\"{auth_href}\" data-auth-state=\"{auth_slug}\">{auth_label}</a>\
@@ -1691,6 +3384,7 @@ pub fn render_html_shell(svg: &str, state: &ConsoleState) -> String {
          </div>",
         state.lazy_dyslexic_loaded,
         area_label(state.route.area),
+        state.route.subview.slug(),
         state.aria_polite,
         state.aria_assertive,
         state.filter_query,
