@@ -171,6 +171,13 @@ pub mod lamp {
     pub const LIT_LEGEND: &str = "#101010";
 }
 
+/// Chrome and shell layout colours (header, status indicators, border accents).
+pub mod chrome {
+    pub const DARK_SLATE: &str = "#0e1116";
+    pub const NEON_CYAN: &str = "#00f0ff";
+    pub const GREEN_GLOW: &str = "#4dff7a";
+}
+
 /// Annunciator state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Lamp {
@@ -298,6 +305,9 @@ mod tests {
             lamp::CAUTION,
             lamp::WARNING,
             lamp::OFF,
+            chrome::DARK_SLATE,
+            chrome::NEON_CYAN,
+            chrome::GREEN_GLOW,
         ] {
             assert!(is_hex(c), "{c}");
         }

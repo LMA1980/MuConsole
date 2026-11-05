@@ -3,7 +3,7 @@
 #
 # Architecture:
 # 1. oauth2-proxy listens on loopback (127.0.0.1:4180) behind Nginx and handles
-#    the GitHub OAuth2 authorization code flow (`scope = "read:user"`).
+#    the GitHub OAuth2 authorization code flow (`scope = "user:email read:org"`).
 # 2. Because GitHub OAuth Apps allow any GitHub account to complete the OAuth
 #    handshake unless restricted to an organization, `oauth2-proxy` authenticates
 #    *which* GitHub login is present and emits `X-Auth-Request-User: <github_login>`
@@ -19,7 +19,7 @@ http_address = "127.0.0.1:4180"
 reverse_proxy = true
 
 provider = "github"
-scope = "read:user"
+scope = "user:email read:org"
 client_id = "REPLACE_WITH_GITHUB_OAUTH_CLIENT_ID"
 client_secret = "REPLACE_WITH_GITHUB_OAUTH_CLIENT_SECRET"
 redirect_url = "https://console.lma1980.duckdns.org/oauth2/callback"
@@ -30,6 +30,7 @@ cookie_secure = true
 cookie_httponly = true
 cookie_samesite = "lax"
 
+whitelist_domains = [".lma1980.duckdns.org", "console.lma1980.duckdns.org"]
 set_xauthrequest = true
 email_domains = ["*"]
 upstreams = ["static://202"]

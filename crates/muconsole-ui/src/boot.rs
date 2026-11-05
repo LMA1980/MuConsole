@@ -9,7 +9,7 @@ use std::rc::Rc;
 
 use js_sys::{Array, ArrayBuffer, Date, Uint8Array};
 use muconsole_layout::{SafeArea, Viewport};
-use muconsole_protocol::{UiCommand, WorkerConfig};
+use muconsole_protocol::{AuthState, UiCommand, WorkerConfig};
 use muconsole_theme::wireframe::WireframeSkin;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -134,6 +134,29 @@ fn repaint(st: &ConsoleState) {
             );
             let _ = shell.set_attribute("data-area", area_slug(st.route.area));
             let _ = shell.set_attribute("data-subview", st.route.subview.slug());
+            let (auth_slug, auth_href, auth_label) = match st.auth() {
+                AuthState::Anonymous => (
+                    "anonymous",
+                    st.sign_in_href(),
+                    "READ-ONLY · SIGN IN".to_owned(),
+                ),
+                AuthState::InviteRequired { github_login } => (
+                    "invite_required",
+                    st.sign_out_href(),
+                    format!("INVITE REQ (@{github_login})"),
+                ),
+                AuthState::Operator { github_login, .. } => (
+                    "operator",
+                    st.sign_out_href(),
+                    format!("@{github_login} · OPERATOR"),
+                ),
+            };
+            let _ = shell.set_attribute("data-auth-state", auth_slug);
+            if let Some(auth_link) = doc.get_element_by_id("muconsole-auth-link") {
+                let _ = auth_link.set_attribute("href", &auth_href);
+                let _ = auth_link.set_attribute("data-auth-state", auth_slug);
+                auth_link.set_text_content(Some(&auth_label));
+            }
         }
         if st.lazy_dyslexic_loaded {
             ensure_dyslexic_stylesheet(&doc);

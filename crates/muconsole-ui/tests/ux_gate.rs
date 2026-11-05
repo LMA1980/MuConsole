@@ -1150,3 +1150,268 @@ fn u12_root_absolute_asset_paths_and_worker_resolution() {
     assert!(!index_content.contains("from './"));
     assert!(!index_content.contains("init('./"));
 }
+
+// ============================================================================
+// Milestone 6.7: WireframeSkin HTML Chrome, Accessibility & Viewport Tests
+// (#244, #245, #246, #247)
+// ============================================================================
+
+use muconsole_theme::css::tokens_css;
+
+/// Helper to extract the declaration block inside `{ ... }` for a given CSS selector.
+fn find_css_block<'a>(css: &'a str, selector: &str) -> &'a str {
+    let pos = css
+        .find(selector)
+        .unwrap_or_else(|| panic!("CSS selector '{selector}' not found in tokens.css"));
+    let open_brace = css[pos..]
+        .find('{')
+        .unwrap_or_else(|| panic!("No '{{' following selector '{selector}'"));
+    let block_start = pos + open_brace + 1;
+    let close_brace = css[block_start..]
+        .find('}')
+        .unwrap_or_else(|| panic!("No '}}' terminating block for '{selector}'"));
+    &css[block_start..block_start + close_brace]
+}
+
+/// Helper to verify a CSS block contains a property with expected value (whitespace-insensitive).
+fn assert_css_has_decl(block: &str, prop: &str, expected_val_substr: &str) {
+    let normalized = block.replace(' ', "");
+    let expected_prop = format!("{prop}:").replace(' ', "");
+    assert!(
+        normalized.contains(&expected_prop),
+        "Block '{block}' is missing property '{prop}:'"
+    );
+    let expected_val = expected_val_substr.replace(' ', "");
+    assert!(
+        normalized.contains(&expected_val),
+        "Block '{block}' missing expected value substring '{expected_val_substr}' for property '{prop}'"
+    );
+}
+
+#[test]
+fn u13_wireframe_skin_tokens_css_definitions_and_layout_rules() {
+    let css = tokens_css();
+
+    // 1. #muconsole-shell: 100dvh flex column container
+    let shell_block = find_css_block(&css, "#muconsole-shell");
+    assert_css_has_decl(shell_block, "display", "flex");
+    assert_css_has_decl(shell_block, "flex-direction", "column");
+    assert!(
+        shell_block.contains("100dvh") || shell_block.contains("100vh"),
+        "#muconsole-shell must enforce 100dvh height, got: {shell_block}"
+    );
+    assert_css_has_decl(shell_block, "overflow", "hidden");
+
+    // 2. #muconsole-header: flex row header bar with border-bottom
+    let header_block = find_css_block(&css, "#muconsole-header");
+    assert_css_has_decl(header_block, "display", "flex");
+    assert!(
+        header_block.contains("border-bottom"),
+        "#muconsole-header must have border-bottom rule, got: {header_block}"
+    );
+
+    // 3. .skip-link: offscreen by default, brought into view on :focus
+    let skip_block = find_css_block(&css, ".skip-link");
+    assert_css_has_decl(skip_block, "position", "absolute");
+    assert!(
+        skip_block.contains("-9999px") || skip_block.contains("-100%"),
+        ".skip-link must be positioned offscreen by default, got: {skip_block}"
+    );
+
+    let focus_block = find_css_block(&css, ".skip-link:focus");
+    assert!(
+        focus_block.contains("z-index"),
+        ".skip-link:focus must specify z-index, got: {focus_block}"
+    );
+    assert!(
+        focus_block.contains("top:8px")
+            || focus_block.contains("top: 8px")
+            || focus_block.contains("top:"),
+        ".skip-link:focus must position link visibly at top, got: {focus_block}"
+    );
+
+    // 4. #muconsole-filter: CRT styled search input
+    let filter_block = find_css_block(&css, "#muconsole-filter");
+    assert_css_has_decl(filter_block, "font-size", "16px");
+    assert!(
+        filter_block.contains("background"),
+        "#muconsole-filter must specify background, got: {filter_block}"
+    );
+    assert!(
+        filter_block.contains("border"),
+        "#muconsole-filter must specify border, got: {filter_block}"
+    );
+
+    // 5. #muconsole-dashboard: flex child filling remaining vertical space
+    let dashboard_block = find_css_block(&css, "#muconsole-dashboard");
+    assert!(
+        dashboard_block.contains("flex:1")
+            || dashboard_block.contains("flex: 1")
+            || dashboard_block.contains("flex:1 1 auto")
+            || dashboard_block.contains("flex: 1 1 auto")
+            || dashboard_block.contains("flex:1 1 0%"),
+        "#muconsole-dashboard must flex-fill available space, got: {dashboard_block}"
+    );
+    assert_css_has_decl(dashboard_block, "overflow", "hidden");
+}
+
+#[test]
+fn u14_semantic_html_shell_header_hierarchy_and_main_dashboard() {
+    let st = ConsoleState::new();
+    let svg_dummy = "<svg id=\"test-canvas\" width=\"100\" height=\"100\"><rect width=\"100\" height=\"100\"/></svg>";
+    let html = render_html_shell(svg_dummy, &st);
+
+    let doc = roxmltree::Document::parse(&html).unwrap_or_else(|e| {
+        panic!("render_html_shell must emit valid XML: {e}\nHTML was:\n{html}")
+    });
+
+    let shell = doc.root_element();
+    assert_eq!(
+        shell.attribute("id"),
+        Some("muconsole-shell"),
+        "Root element must have id=\"muconsole-shell\""
+    );
+
+    // 1. Header container must exist under shell
+    let header = shell
+        .children()
+        .find(|n| n.has_tag_name("header") && n.attribute("id") == Some("muconsole-header"))
+        .expect("render_html_shell must contain <header id=\"muconsole-header\"> child under #muconsole-shell");
+
+    // 2. Skip-link must be wrapped in header and target #muconsole-dashboard
+    let skip_link = header
+        .descendants()
+        .find(|n| {
+            n.attribute("class")
+                .is_some_and(|c| c.split_whitespace().any(|x| x == "skip-link"))
+        })
+        .expect("<header id=\"muconsole-header\"> must wrap .skip-link");
+    assert_eq!(skip_link.attribute("href"), Some("#muconsole-dashboard"));
+
+    // 3. Filter input must be wrapped in header
+    let filter = header
+        .descendants()
+        .find(|n| n.attribute("id") == Some("muconsole-filter"))
+        .expect("<header id=\"muconsole-header\"> must wrap #muconsole-filter");
+    assert_eq!(filter.tag_name().name(), "input");
+    assert_eq!(filter.attribute("type"), Some("search"));
+
+    // 4. Polite and assertive live regions must be wrapped in header
+    let polite = header
+        .descendants()
+        .find(|n| n.attribute("id") == Some("muconsole-aria-polite"))
+        .expect("<header id=\"muconsole-header\"> must wrap #muconsole-aria-polite");
+    assert_eq!(polite.attribute("role"), Some("status"));
+    assert_eq!(polite.attribute("aria-live"), Some("polite"));
+
+    let assertive = header
+        .descendants()
+        .find(|n| n.attribute("id") == Some("muconsole-aria-assertive"))
+        .expect("<header id=\"muconsole-header\"> must wrap #muconsole-aria-assertive");
+    assert_eq!(assertive.attribute("role"), Some("alert"));
+    assert_eq!(assertive.attribute("aria-live"), Some("assertive"));
+
+    // 5. Auth link must be wrapped in header
+    let auth_link = header
+        .descendants()
+        .find(|n| n.attribute("id") == Some("muconsole-auth-link"))
+        .expect("<header id=\"muconsole-header\"> must wrap #muconsole-auth-link");
+    assert_eq!(auth_link.tag_name().name(), "a");
+
+    // 6. Main dashboard container must be sibling to header (NOT inside header)
+    let main = shell
+        .children()
+        .find(|n| n.has_tag_name("main") && n.attribute("id") == Some("muconsole-dashboard"))
+        .expect("render_html_shell must emit <main id=\"muconsole-dashboard\"> directly under #muconsole-shell");
+    assert_ne!(
+        main.parent(),
+        Some(header),
+        "<main id=\"muconsole-dashboard\"> must NOT be nested inside <header>"
+    );
+
+    // 7. Main dashboard must contain the rendered SVG canvas
+    assert!(
+        main.descendants()
+            .any(|n| n.attribute("id") == Some("test-canvas")),
+        "<main id=\"muconsole-dashboard\"> must wrap the SVG canvas"
+    );
+}
+
+#[test]
+fn u15_ios_safari_viewport_safety_and_filter_font_size_invariant() {
+    let css = tokens_css();
+
+    // 1. In tokens.css, #muconsole-filter must enforce font-size: 16px (or greater)
+    let filter_block = find_css_block(&css, "#muconsole-filter");
+    assert_css_has_decl(filter_block, "font-size", "16px");
+
+    // Ensure no sub-16px font-size exists for #muconsole-filter
+    for sub_px in ["10px", "11px", "12px", "13px", "14px", "15px"] {
+        assert!(
+            !filter_block.contains(&format!("font-size:{sub_px}"))
+                && !filter_block.contains(&format!("font-size: {sub_px}")),
+            "#muconsole-filter must never specify sub-16px font-size '{sub_px}' (triggers iOS auto-zoom)"
+        );
+    }
+
+    // 2. In rendered HTML shell, input must enforce font-size: 16px across font toggles
+    for &font in &[CrtFont::Hurmit, CrtFont::OpenDyslexic] {
+        let mut st = ConsoleState::new();
+        st.set_font(font);
+        if font == CrtFont::OpenDyslexic {
+            st.lazy_dyslexic_loaded = true;
+        }
+        let html = render_html_shell("<svg></svg>", &st);
+        let doc = roxmltree::Document::parse(&html).expect("valid XML");
+        let filter_node = doc
+            .descendants()
+            .find(|n| n.attribute("id") == Some("muconsole-filter"))
+            .expect("must find #muconsole-filter");
+
+        // Verify either inline style or embedded <style> enforces 16px
+        let has_16px_inline = filter_node
+            .attribute("style")
+            .is_some_and(|s| s.contains("font-size:16px") || s.contains("font-size: 16px"));
+        let has_16px_style_tag = html.contains("#muconsole-filter{font-size:16px")
+            || html.contains("#muconsole-filter { font-size: 16px")
+            || html.contains("#muconsole-filter{font-size: 16px");
+        assert!(
+            has_16px_inline || has_16px_style_tag,
+            "Font {font:?}: #muconsole-filter must explicitly declare font-size: 16px"
+        );
+    }
+}
+
+#[test]
+fn u16_tokens_css_distribution_drift_and_synchronization() {
+    let generated = tokens_css();
+    let checked_in_dist = include_str!("../../../dist/tokens.css");
+    assert_eq!(
+        generated,
+        checked_in_dist,
+        "dist/tokens.css has drifted from tokens_css()!\n\
+         Ensure scripts/build-dist.sh or 'cp crates/muconsole-theme/assets/tokens.css dist/tokens.css' is run."
+    );
+
+    // dist/tokens.css must contain the new M6.7 selectors
+    assert!(
+        checked_in_dist.contains("#muconsole-shell"),
+        "dist/tokens.css missing #muconsole-shell"
+    );
+    assert!(
+        checked_in_dist.contains("#muconsole-header"),
+        "dist/tokens.css missing #muconsole-header"
+    );
+    assert!(
+        checked_in_dist.contains(".skip-link"),
+        "dist/tokens.css missing .skip-link"
+    );
+    assert!(
+        checked_in_dist.contains("#muconsole-filter"),
+        "dist/tokens.css missing #muconsole-filter"
+    );
+    assert!(
+        checked_in_dist.contains("#muconsole-dashboard"),
+        "dist/tokens.css missing #muconsole-dashboard"
+    );
+}
