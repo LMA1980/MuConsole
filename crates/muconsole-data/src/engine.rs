@@ -232,6 +232,24 @@ impl Engine {
             }
             // UI-local in Phase 3; nothing to fetch.
             UiCommand::Page { .. } | UiCommand::SetCrtFont(_) => {}
+            UiCommand::SetAuthSession(dto) => {
+                self.store.apply(Input::AuthSession(dto), now_ms);
+            }
+            UiCommand::RedeemInvite { token } => {
+                if self.mode == Mode::Live && !token.is_empty() {
+                    self.fetch(FetchKind::AuthRedeem(token), &mut fx);
+                }
+            }
+            UiCommand::RestartJob { job_id: _ } => {
+                if self.store.auth().is_operator() {
+                    self.retry(now_ms, &mut fx);
+                } else {
+                    fx.push(Effect::Post(DataEvent::Error(UiError::Http {
+                        status: 403,
+                        message: "Operator session required to restart jobs".into(),
+                    })));
+                }
+            }
         }
         fx
     }
@@ -284,6 +302,7 @@ impl Engine {
             }));
             self.set_conn(ConnState::Connecting, fx);
             fx.push(Effect::LoadOffline);
+            self.fetch(FetchKind::AuthSession, fx);
             self.fetch(FetchKind::Repos, fx);
             for s in StreamId::ALL {
                 self.open_stream(s, fx);
@@ -312,6 +331,7 @@ impl Engine {
                         self.open_stream(s, fx);
                     }
                 }
+                self.fetch(FetchKind::AuthSession, fx);
                 self.fetch(FetchKind::Repos, fx);
                 self.fetch_selection(fx);
             }
@@ -346,6 +366,8 @@ impl Engine {
             FetchKind::Topology(r) => paths::topology(&r.owner, &r.repo),
             FetchKind::Deployments(r) => paths::deployments(&r.owner, &r.repo, HISTORY_LIMIT),
             FetchKind::Gate(id) => paths::gate(id),
+            FetchKind::AuthSession => paths::AUTH_SESSION.to_owned(),
+            FetchKind::AuthRedeem(_) => paths::AUTH_REDEEM.to_owned(),
         };
         fx.push(Effect::Fetch {
             kind,
@@ -436,7 +458,11 @@ impl Engine {
         result: Result<String, HttpError>,
         now_ms: u64,
     ) -> Vec<Effect> {
-        if !matches!(kind, FetchKind::Repos) && gen != self.selection_gen {
+        if !matches!(
+            kind,
+            FetchKind::Repos | FetchKind::AuthSession | FetchKind::AuthRedeem(_)
+        ) && gen != self.selection_gen
+        {
             return Vec::new();
         }
         self.on_fetch(kind, result, now_ms)
@@ -456,8 +482,10 @@ impl Engine {
         let body = match result {
             Ok(b) => b,
             Err(e) => {
-                // A 404 for a single repo's CD history just means "no CD".
-                if !(e.status == 404 && matches!(kind, FetchKind::Deployments(_))) {
+                // A 404 for a single repo's CD history or auth session probe is non-fatal.
+                if !(e.status == 404
+                    && matches!(kind, FetchKind::Deployments(_) | FetchKind::AuthSession))
+                {
                     fx.push(Effect::Post(DataEvent::Error(UiError::Http {
                         status: e.status,
                         message: e.message,
@@ -492,6 +520,10 @@ impl Engine {
                 self.update_conn(now_ms, &mut fx);
             }
             FetchKind::Deployments(repo) => self.fetch_latest_gate(repo, &mut fx),
+            FetchKind::AuthRedeem(_) if self.store.auth().is_operator() => {
+                self.fetch(FetchKind::Repos, &mut fx);
+                self.fetch_selection(&mut fx);
+            }
             _ => {}
         }
         fx

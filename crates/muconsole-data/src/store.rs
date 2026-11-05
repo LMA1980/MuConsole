@@ -9,15 +9,15 @@
 use std::collections::BTreeMap;
 
 use muconsole_protocol::dto::{
-    BranchCreatedDto, BranchDeletedDto, DeploymentDto, GateDto, ItProgressDto, JobStageChangedDto,
-    LeaseExpiredDto, NodeMembershipChangedDto, PrStateChangedDto, PromotedDto, RepoDto,
-    RepoSummaryDto, RolledBackDto, TaintedDto, TopologyDto,
+    AuthSessionDto, BranchCreatedDto, BranchDeletedDto, DeploymentDto, GateDto, ItProgressDto,
+    JobStageChangedDto, LeaseExpiredDto, NodeMembershipChangedDto, PrStateChangedDto, PromotedDto,
+    RepoDto, RepoSummaryDto, RolledBackDto, TaintedDto, TopologyDto,
 };
 use muconsole_protocol::{
-    AreaBadges, Branch, CdScore, DataSource, DeploymentGate, DeploymentSummary, FabricNode,
-    FadeReason, GateOutcome, GateTest, ParentRef, PrState, RepoId, RepoScore, RepoStatus,
-    RepoTopology, RollbackReason, Selection, SidingPhase, StageState, Station, SubmoduleRef, Train,
-    ViewModel,
+    AreaBadges, AuthState, Branch, CdScore, DataSource, DeploymentGate, DeploymentSummary,
+    FabricNode, FadeReason, GateOutcome, GateTest, ParentRef, PrState, RepoId, RepoScore,
+    RepoStatus, RepoTopology, RollbackReason, Selection, SidingPhase, StageState, Station,
+    SubmoduleRef, Train, ViewModel,
 };
 
 /// A merged or deleted siding is removed this long after it starts fading.
@@ -46,6 +46,8 @@ pub enum Input {
     Tainted(TaintedDto),
     LeaseExpired(LeaseExpiredDto),
     Select(Selection),
+    /// Operator authentication session state (`/api/auth/session` or `/api/auth/redeem`).
+    AuthSession(AuthSessionDto),
     /// Offline snapshot restored from CacheStorage (`saved_epoch_ms`, view).
     Restore {
         saved_epoch_ms: u64,
@@ -70,6 +72,7 @@ pub struct Store {
     latest: BTreeMap<RepoId, String>,
     nodes: BTreeMap<String, FabricNode>,
     selection: Option<Selection>,
+    auth: AuthState,
     /// Offline snapshot shown until live data arrives.
     offline: Option<(u64, ViewModel)>,
     loaded: bool,
@@ -113,8 +116,16 @@ fn upsert_sorted<T, K: Ord>(v: &mut Vec<T>, item: T, key: impl Fn(&T) -> K) {
 impl Store {
     #[must_use]
     pub fn new(source: DataSource) -> Self {
+        let auth = match &source {
+            DataSource::Scenario(_) => AuthState::Operator {
+                github_login: "operator".into(),
+                role: Some("operator".into()),
+            },
+            DataSource::Live | DataSource::OfflineCache => AuthState::Anonymous,
+        };
         Self {
             source,
+            auth,
             dirty: true,
             ..Self::default()
         }
@@ -140,6 +151,12 @@ impl Store {
     #[must_use]
     pub fn selection(&self) -> Option<&Selection> {
         self.selection.as_ref()
+    }
+
+    /// Current operator authentication state.
+    #[must_use]
+    pub fn auth(&self) -> &AuthState {
+        &self.auth
     }
 
     /// Repository whose topology the selection shows (submodule repo when a
@@ -226,6 +243,12 @@ impl Store {
             Input::Select(sel) => {
                 let changed = self.selection.as_ref() != Some(&sel);
                 self.selection = Some(sel);
+                changed
+            }
+            Input::AuthSession(dto) => {
+                let next = AuthState::from_session(&dto);
+                let changed = self.auth != next;
+                self.auth = next;
                 changed
             }
             Input::Restore {
@@ -807,6 +830,7 @@ impl Store {
             history,
             nodes: self.nodes.values().cloned().collect(),
             stale_since_epoch_ms: None,
+            auth: self.auth.clone(),
         }
     }
 }

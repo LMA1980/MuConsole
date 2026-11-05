@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use muconsole_protocol::{
-    Area, CrtFont, PanelId, RepoId, RepoScore, Route, SubmoduleId, UiCommand,
+    Area, AuthState, CrtFont, PanelId, RepoId, RepoScore, Route, SubmoduleId, UiCommand,
 };
 use muconsole_theme::instruments::switch::SwitchAction;
 use muconsole_theme::interaction::{SwitchEvent, SwitchOutcome, SwitchState};
@@ -17,6 +17,8 @@ use crate::router::{area_label, escape_up, parse_hash};
 
 /// `localStorage` key persisting the user's selected CRT reading font.
 pub const FONT_STORAGE_KEY: &str = "muconsole.font";
+/// `sessionStorage` key holding a captured one-time `?invite=<token>` across OAuth redirects.
+pub const PENDING_INVITE_STORAGE_KEY: &str = "muconsole.pending_invite";
 /// Rotary settle window before dispatching [`UiCommand::SelectRepo`].
 pub const ROTARY_SETTLE_MS: u64 = 350;
 /// Armed confirmation window (ms) for the guarded Trainway `RESTART` control.
@@ -24,6 +26,37 @@ pub const RESTART_ARM_WINDOW_MS: u64 = 3_000;
 
 /// Ordered areas on the C1 selector rail.
 pub const AREAS: [Area; 4] = [Area::Overview, Area::Ci, Area::Cd, Area::Fleet];
+
+/// Extract `?invite=<token>` from a URL query string and return `(Some(token), sanitized_query)`
+/// with the `invite` parameter stripped so one-time invite tokens are removed from browser history.
+#[must_use]
+pub fn extract_invite_token(query: &str) -> (Option<String>, String) {
+    let raw = query.trim_start_matches('?');
+    if raw.is_empty() {
+        return (None, String::new());
+    }
+    let mut token = None;
+    let mut kept = Vec::new();
+    for pair in raw.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        if let Some(("invite", val)) = pair.split_once('=') {
+            let trimmed = val.trim();
+            if !trimmed.is_empty() {
+                token = Some(trimmed.to_owned());
+            }
+        } else {
+            kept.push(pair);
+        }
+    }
+    let clean = if kept.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", kept.join("&"))
+    };
+    (token, clean)
+}
 
 /// Parse `?font=dyslexic|hurmit` or stored `localStorage` value.
 #[must_use]
@@ -100,6 +133,8 @@ pub struct ConsoleState {
     pub aria_polite: String,
     /// Assertive `aria-live` alert text.
     pub aria_assertive: String,
+    /// One-time invite token captured from `?invite=<token>` or `sessionStorage`.
+    pub pending_invite: Option<String>,
 }
 
 impl Default for ConsoleState {
@@ -142,14 +177,34 @@ impl ConsoleState {
             fleet_page: 0,
             aria_polite: String::new(),
             aria_assertive: String::new(),
+            pending_invite: None,
         }
     }
 
-    /// Initialize route and font preference from browser location + storage.
+    /// Initialize route, font preference, and any `?invite=<token>` from browser location + storage.
     pub fn init_from_env(&mut self, hash: &str, search: &str, stored_font: Option<&str>) {
         self.route = parse_hash(hash);
+        let (invite, _) = extract_invite_token(search);
+        if invite.is_some() {
+            self.pending_invite = invite;
+        }
         let f = parse_font_pref(search, stored_font);
         self.set_font(f);
+    }
+
+    /// Current operator authentication state from the view model (defaults to [`AuthState::Anonymous`]).
+    #[must_use]
+    pub fn auth(&self) -> AuthState {
+        self.client
+            .view()
+            .map(|v| v.auth.clone())
+            .unwrap_or(AuthState::Anonymous)
+    }
+
+    /// Whether the active session is an authenticated, invite-bound operator.
+    #[must_use]
+    pub fn is_operator(&self) -> bool {
+        self.auth().is_operator()
     }
 
     /// Active font metrics (`HURMIT` or `OPEN_DYSLEXIC`).
@@ -376,11 +431,18 @@ impl ConsoleState {
 
     /// Feed an event into the guarded `PullToTurn` Trainway `RESTART` switch.
     ///
+    /// Requires an authenticated operator session (`self.is_operator()`).
     /// Rotating to position `1` (`RST`) requires either a >= 300 ms pull hold
     /// or `shift: true`. The first valid rotation arms the control for
     /// [`RESTART_ARM_WINDOW_MS`]; confirming within that window dispatches
     /// [`UiCommand::Retry`].
     pub fn on_restart_switch(&mut self, ev: SwitchEvent, now_ms: u64) -> Option<UiCommand> {
+        if !self.is_operator() {
+            self.restart_armed_until_ms = None;
+            self.aria_assertive =
+                "RAW LOGS & JOB RESTART REQUIRE INVITED GITHUB OPERATOR SESSION".into();
+            return None;
+        }
         if let Some(until) = self.restart_armed_until_ms {
             if now_ms > until {
                 self.restart_armed_until_ms = None;

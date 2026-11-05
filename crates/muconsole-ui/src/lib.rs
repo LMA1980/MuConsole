@@ -55,6 +55,7 @@ mod tests {
     use muconsole_theme::metrics::HURMIT;
 
     #[test]
+    #[cfg_attr(miri, ignore)]
     fn static_layer_renders_every_region() {
         let f = frames(1512.0, 860.0, SafeArea::ZERO, Area::Ci, &HURMIT);
         let svg = static_layer(&f, Effects::LITE);

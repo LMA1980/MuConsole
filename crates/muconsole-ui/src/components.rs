@@ -7,8 +7,8 @@ use muconsole_layout::{
     solve, Breakpoint, Card, Carousel, Frames, Panel as LayoutPanel, PanelKind, SafeArea, Viewport,
 };
 use muconsole_protocol::{
-    Area, ConnState, CrtFont, GateOutcome, GateTest, PrState, RepoScore, RepoStatus, RepoTopology,
-    SidingPhase, StageState, TestState,
+    Area, AuthState, ConnState, CrtFont, GateOutcome, GateTest, PrState, RepoScore, RepoStatus,
+    RepoTopology, SidingPhase, StageState, TestState,
 };
 use muconsole_theme::instruments::switch::SwitchAction;
 use muconsole_theme::instruments::Rect;
@@ -202,7 +202,7 @@ fn render_c2_top_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, f
     let right_reserve = if frames.breakpoint == Breakpoint::Phone {
         218.0_f64.min(inner.w * 0.58)
     } else {
-        436.0_f64.min(inner.w * 0.52)
+        520.0_f64.min(inner.w * 0.62)
     };
 
     // Breadcrumb segments on the left.
@@ -289,8 +289,9 @@ fn render_c2_top_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, f
             .is_some_and(RepoTopology::stop);
         let reload = state.client.reload_required().is_some();
 
-        let font_w = 212.0_f64.min(right_reserve * 0.50).max(80.0);
-        let lamp_w = ((right_reserve - font_w - 16.0) / 3.0).clamp(48.0, 72.0);
+        let font_w = 196.0_f64.min(right_reserve * 0.38).max(80.0);
+        let auth_w = 128.0_f64.min(right_reserve * 0.25).max(64.0);
+        let lamp_w = ((right_reserve - font_w - auth_w - 20.0) / 3.0).clamp(44.0, 68.0);
         let lamps = [
             (
                 "lamp-stale",
@@ -318,7 +319,31 @@ fn render_c2_top_bar(skin: &dyn Skin, w: &mut SvgWriter, state: &ConsoleState, f
             );
         }
 
-        let font_x = (inner.right() - font_w).max(rx);
+        let auth = state.auth();
+        let (auth_val, auth_tone) = match &auth {
+            AuthState::Anonymous => ("READ-ONLY · SIGN IN".to_owned(), SemanticTone::Neutral),
+            AuthState::InviteRequired { github_login } => {
+                (format!("INVITE REQ (@{github_login})"), SemanticTone::Warn)
+            }
+            AuthState::Operator { github_login, .. } => {
+                (format!("@{github_login} · OPERATOR"), SemanticTone::Pass)
+            }
+        };
+        let auth_x = rx + 3.0 * (lamp_w + 4.0);
+        let auth_rect = clamp_rect(Rect::new(auth_x, inner.y, auth_w, inner.h), inner);
+        skin.readout(
+            w,
+            &Readout {
+                control_id: "c2-auth-status",
+                label: "AUTH",
+                value: &auth_val,
+                rect: auth_rect,
+                tone: auth_tone,
+                interactive: true,
+            },
+        );
+
+        let font_x = (inner.right() - font_w).max(auth_rect.right() + 4.0);
         let font_rect = clamp_rect(
             Rect::new(font_x, inner.y, (inner.right() - font_x).max(48.0), inner.h),
             inner,
@@ -847,7 +872,8 @@ fn render_c5_trainway(
     let hdr_h = ((screen_rect.y - rect.y) - 8.0).clamp(16.0, 24.0);
     let right = rect.right() - 6.0;
 
-    // Guarded PullToTurn RESTART switch.
+    // Guarded PullToTurn RESTART switch (requires invited GitHub operator session).
+    let is_operator = state.is_operator();
     let rst_w = if rect.w < 500.0 {
         116.0_f64.min(rect.w * 0.30)
     } else {
@@ -866,7 +892,9 @@ fn render_c5_trainway(
         },
         SelectorOption {
             id: "rst",
-            label: if state.restart_armed_until_ms.is_some() {
+            label: if !is_operator {
+                "LOCKED"
+            } else if state.restart_armed_until_ms.is_some() {
                 "CONFIRM!"
             } else if rst_w < 124.0 {
                 "RESTART"
@@ -874,7 +902,11 @@ fn render_c5_trainway(
                 "HOLD RST"
             },
             badge: None,
-            tone: SemanticTone::Warn,
+            tone: if is_operator {
+                SemanticTone::Warn
+            } else {
+                SemanticTone::Neutral
+            },
         },
     ];
     skin.selector(
@@ -1391,7 +1423,7 @@ fn render_c6_delivery_gate(
             g.rollback_lit(),
         ));
 
-        // Selected test's log excerpt (paged, zero scrollbars).
+        // Selected test's log excerpt (paged, zero scrollbars; gated on operator auth).
         if let Some(sel_tc) = g
             .tests
             .get(state.selected_test_idx)
@@ -1408,17 +1440,29 @@ fn render_c6_delivery_gate(
                 None,
                 false,
             ));
-            let lines = extract_log_lines(sel_tc);
-            let per_page = 1_usize;
-            total_log_pages = u32::try_from(lines.len().div_ceil(per_page).max(1)).unwrap_or(1);
-            let pg = (state.log_page as usize).min((total_log_pages as usize).saturating_sub(1));
-            for (li, l) in lines.iter().skip(pg * per_page).take(per_page).enumerate() {
+            if state.is_operator() {
+                let lines = extract_log_lines(sel_tc);
+                let per_page = 1_usize;
+                total_log_pages = u32::try_from(lines.len().div_ceil(per_page).max(1)).unwrap_or(1);
+                let pg =
+                    (state.log_page as usize).min((total_log_pages as usize).saturating_sub(1));
+                for (li, l) in lines.iter().skip(pg * per_page).take(per_page).enumerate() {
+                    rows_data.push((
+                        format!("LOG[{}]: {l}", pg * per_page + li + 1),
+                        SemanticTone::Info,
+                        None,
+                        false,
+                        Some("c6-log-pager".into()),
+                        false,
+                    ));
+                }
+            } else {
                 rows_data.push((
-                    format!("LOG[{}]: {l}", pg * per_page + li + 1),
-                    SemanticTone::Info,
+                    "RAW LOGS & RESTART REQUIRE OPERATOR SESSION".into(),
+                    SemanticTone::Warn,
                     None,
                     false,
-                    Some("c6-log-pager".into()),
+                    Some("c6-log-auth-gate".into()),
                     false,
                 ));
             }
@@ -1606,9 +1650,10 @@ fn render_fleet_panel(
 
 /// Render the accessible HTML shell wrapping `svg` with:
 /// - Skip-to-dashboard link (`#muconsole-dashboard`);
+/// - Operator authentication link (`#muconsole-auth-link`);
 /// - Polite and assertive `aria-live` regions;
 /// - `font-size: 16px` `/` type-ahead repository filter `<input>` (preventing iOS Safari auto-zoom);
-/// - `data-crt-font` and `data-lazy-dyslexic` attributes.
+/// - `data-crt-font`, `data-lazy-dyslexic`, and `data-auth-state` attributes.
 #[must_use]
 pub fn render_html_shell(svg: &str, state: &ConsoleState) -> String {
     let font_attr = font_slug(state.font);
@@ -1617,10 +1662,28 @@ pub fn render_html_shell(svg: &str, state: &ConsoleState) -> String {
     } else {
         ""
     };
+    let (auth_slug, auth_href, auth_label) = match state.auth() {
+        AuthState::Anonymous => (
+            "anonymous",
+            "/oauth2/start?rd=/",
+            "READ-ONLY · SIGN IN".to_owned(),
+        ),
+        AuthState::InviteRequired { github_login } => (
+            "invite_required",
+            "/oauth2/sign_out?rd=/",
+            format!("INVITE REQ (@{github_login})"),
+        ),
+        AuthState::Operator { github_login, .. } => (
+            "operator",
+            "/oauth2/sign_out?rd=/",
+            format!("@{github_login} · OPERATOR"),
+        ),
+    };
     format!(
-        "<div id=\"muconsole-shell\" data-crt-font=\"{font_attr}\" data-lazy-dyslexic=\"{}\" data-area=\"{}\">\
+        "<div id=\"muconsole-shell\" data-crt-font=\"{font_attr}\" data-lazy-dyslexic=\"{}\" data-area=\"{}\" data-auth-state=\"{auth_slug}\">\
          <style>{dyslexic_face}#muconsole-filter{{font-size:16px;}}</style>\
          <a href=\"#muconsole-dashboard\" class=\"skip-link\">Skip to dashboard</a>\
+         <a id=\"muconsole-auth-link\" href=\"{auth_href}\" data-auth-state=\"{auth_slug}\">{auth_label}</a>\
          <div id=\"muconsole-aria-polite\" role=\"status\" aria-live=\"polite\" aria-atomic=\"true\">{}</div>\
          <div id=\"muconsole-aria-assertive\" role=\"alert\" aria-live=\"assertive\" aria-atomic=\"true\">{}</div>\
          <input id=\"muconsole-filter\" type=\"search\" aria-label=\"Type-ahead repository filter\" style=\"font-size:16px\" value=\"{}\"/>\
