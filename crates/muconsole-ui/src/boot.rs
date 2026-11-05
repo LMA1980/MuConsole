@@ -343,6 +343,13 @@ pub fn start() {
                 if let Some((attr, val)) = find_action_attribute(&target) {
                     let mut st = state_for_click.borrow_mut();
                     let cmds = st.on_dom_action(attr, &val, ev.shift_key(), now_ms());
+                    for cmd in &cmds {
+                        if let UiCommand::Navigate { ref href } = cmd {
+                            if let Some(win) = web_sys::window() {
+                                let _ = win.location().set_href(href);
+                            }
+                        }
+                    }
                     send_all(&worker_for_click, &cmds);
                     sync_browser_state(&st);
                     repaint(&st);

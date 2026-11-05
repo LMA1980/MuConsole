@@ -376,6 +376,10 @@ pub enum UiCommand {
     RestartJob {
         job_id: u64,
     },
+    /// Client-side or browser navigation requested by the UI.
+    Navigate {
+        href: String,
+    },
 }
 
 /// Connection state of the worker's upstream streams.

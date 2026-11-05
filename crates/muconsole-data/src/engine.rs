@@ -269,7 +269,7 @@ impl Engine {
                 }
             }
             // UI-local in Phase 3; nothing to fetch.
-            UiCommand::Page { .. } | UiCommand::SetCrtFont(_) => {}
+            UiCommand::Page { .. } | UiCommand::SetCrtFont(_) | UiCommand::Navigate { .. } => {}
             UiCommand::SetAuthSession(dto) => {
                 self.store.apply(Input::AuthSession(dto), now_ms);
             }
