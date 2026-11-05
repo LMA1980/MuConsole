@@ -37,7 +37,7 @@ All JSON field names and enum variants use `snake_case`, timestamps are Unix epo
   - `GET /api/obs/v1/logs`
   - `GET /api/obs/v1/metrics/timeseries`
   - `GET /api/obs/v1/store/status`
-  - Read-only (`GET`/`HEAD`) reverse-proxied from `/api/obs/` (and `/api/observe/`) to `http://127.0.0.1:9095/api/`. All log and span messages are sanitized via `sanitize_public_log` (`192.168.###.` IP masking and private hostname redaction).
+  - Read-only (`GET`/`HEAD`) reverse-proxied from `/api/obs/` (and `/api/observe/`) to `http://127.0.0.1:9095/api/`. All log and span messages are sanitized via `sanitize_public_log` (RFC 1918 private IP masking and private hostname redaction).
 
 ______________________________________________________________________
 

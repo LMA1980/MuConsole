@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+members = [
+    "protocol",
+    "theme",
+    "layout",
+    "ui",
+    "data",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/LMA1980/mu-console"
+authors = ["LMA1980"]
+
+[workspace.dependencies]
+mu-console-protocol = { path = "protocol", version = "0.1.0" }
+mu-console-theme = { path = "theme", version = "0.1.0" }
+mu-console-layout = { path = "layout", version = "0.1.0" }
+mu-console-ui = { path = "ui", version = "0.1.0" }
+mu-console-data = { path = "data", version = "0.1.0" }
+
+# Aliases for backward compatibility:
+muconsole-protocol = { package = "mu-console-protocol", path = "protocol" }
+muconsole-theme = { package = "mu-console-theme", path = "theme" }
+muconsole-layout = { package = "mu-console-layout", path = "layout" }
+muconsole-ui = { package = "mu-console-ui", path = "ui" }
+muconsole-data = { package = "mu-console-data", path = "data" }
+
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
+roxmltree = "0.20"
+serde_json = "1"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = "0.3"
+
+[patch."https://github.com/LMA1980/mu-console-protocol.git"]
+mu-console-protocol = { path = "protocol" }
+
+[patch."https://github.com/LMA1980/mu-console-theme.git"]
+mu-console-theme = { path = "theme" }
+
+[patch."https://github.com/LMA1980/mu-console-layout.git"]
+mu-console-layout = { path = "layout" }
+
+[patch."https://github.com/LMA1980/mu-console-ui.git"]
+mu-console-ui = { path = "ui" }
+
+[patch."https://github.com/LMA1980/mu-console-data.git"]
+mu-console-data = { path = "data" }
+
+[patch.crates-io]
+mu-console-protocol = { path = "protocol" }
+mu-console-theme = { path = "theme" }
+mu-console-layout = { path = "layout" }
+mu-console-ui = { path = "ui" }
+mu-console-data = { path = "data" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
