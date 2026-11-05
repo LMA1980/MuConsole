@@ -9,14 +9,15 @@
 use std::collections::BTreeMap;
 
 use muconsole_protocol::dto::{
-    BranchCreatedDto, BranchDeletedDto, CanaryBundleDto, CasStatusDto, DeploymentDto, GateDto,
-    ItProgressDto, JobStageChangedDto, LeaseExpiredDto, MetricSeriesDto, NodeMembershipChangedDto,
-    OtelLogDto, PackageDto, PrStateChangedDto, ProblemDto, PromotedDto, RepoDto, RepoSummaryDto,
-    RolledBackDto, SmartscapeDto, StoreStatusDto, TaintedDto, TopologyDto, TraceDto,
+    AuthSessionDto, BranchCreatedDto, BranchDeletedDto, CanaryBundleDto, CasStatusDto,
+    DeploymentDto, GateDto, ItProgressDto, JobStageChangedDto, LeaseExpiredDto, MetricSeriesDto,
+    NodeMembershipChangedDto, OtelLogDto, PackageDto, PrStateChangedDto, ProblemDto, PromotedDto,
+    RepoDto, RepoSummaryDto, RolledBackDto, SmartscapeDto, StoreStatusDto, TaintedDto, TopologyDto,
+    TraceDto,
 };
 use muconsole_protocol::{
-    sanitize_public_log, AreaBadges, Branch, CanaryBundle, CanaryBundleState, CasHealth, CdLease,
-    CdScore, DataSource, DataStoreHealth, DeploymentGate, DeploymentSummary, FabricNode,
+    sanitize_public_log, AreaBadges, AuthState, Branch, CanaryBundle, CanaryBundleState, CasHealth,
+    CdLease, CdScore, DataSource, DataStoreHealth, DeploymentGate, DeploymentSummary, FabricNode,
     FadeReason, GateOutcome, GateTest, HardwareMetricSeries, LogSeverity, ObserveView,
     OtelLogEntry, PackageEcosystem, ParentRef, PrState, ProblemCategory, PurePathTrace,
     RegistryPackage, RegistryView, RepoId, RepoScore, RepoStatus, RepoTopology, RollbackReason,
@@ -63,6 +64,8 @@ pub enum Input {
     Tainted(TaintedDto),
     LeaseExpired(LeaseExpiredDto),
     Select(Selection),
+    /// Operator authentication session state (`/api/auth/session` or `/api/auth/redeem`).
+    AuthSession(AuthSessionDto),
     /// Offline snapshot restored from CacheStorage (`saved_epoch_ms`, view).
     Restore {
         saved_epoch_ms: u64,
@@ -91,6 +94,7 @@ pub struct Store {
     registry: RegistryView,
     observe: ObserveView,
     selection: Option<Selection>,
+    auth: AuthState,
     /// Offline snapshot shown until live data arrives.
     offline: Option<(u64, ViewModel)>,
     loaded: bool,
@@ -747,8 +751,16 @@ fn default_observe() -> ObserveView {
 impl Store {
     #[must_use]
     pub fn new(source: DataSource) -> Self {
+        let auth = match &source {
+            DataSource::Scenario(_) => AuthState::Operator {
+                github_login: "operator".into(),
+                role: Some("operator".into()),
+            },
+            DataSource::Live | DataSource::OfflineCache => AuthState::Anonymous,
+        };
         Self {
             source,
+            auth,
             dirty: true,
             ..Self::default()
         }
@@ -774,6 +786,12 @@ impl Store {
     #[must_use]
     pub fn selection(&self) -> Option<&Selection> {
         self.selection.as_ref()
+    }
+
+    /// Current operator authentication state.
+    #[must_use]
+    pub fn auth(&self) -> &AuthState {
+        &self.auth
     }
 
     /// Repository whose topology the selection shows (submodule repo when a
@@ -1078,6 +1096,12 @@ impl Store {
             Input::Select(sel) => {
                 let changed = self.selection.as_ref() != Some(&sel);
                 self.selection = Some(sel);
+                changed
+            }
+            Input::AuthSession(dto) => {
+                let next = AuthState::from_session(&dto);
+                let changed = self.auth != next;
+                self.auth = next;
                 changed
             }
             Input::Restore {
@@ -1680,6 +1704,7 @@ impl Store {
             sandboxes: self.sandboxes.clone(),
             registry: self.registry.clone(),
             observe: self.observe.clone(),
+            auth: self.auth.clone(),
         }
     }
 }

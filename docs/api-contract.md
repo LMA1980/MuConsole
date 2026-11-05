@@ -11,7 +11,13 @@ All JSON field names and enum variants use `snake_case`, timestamps are Unix epo
   - `GET /api/repos/{owner}/{repo}/summary`
   - `GET /api/repos/{owner}/{repo}/topology`
   - `GET /api/events` (SSE stream)
-  - Public repositories are readable anonymously. Private, internal, and unclassified repositories are only returned when authenticated (`Authorization: Bearer <key>` or `X-Api-Key: <key>` matching `ACTION_RUNNER_LOG_API_KEY`; fails closed when unset). Anonymous requests for private repositories receive `404`.
+  - `GET /api/auth/session` (operator session status)
+  - `POST /api/auth/redeem` (one-time invite redemption)
+  - `POST /api/auth/invites`, `GET /api/auth/invites`, `DELETE /api/auth/invites/{id}` (admin invite lifecycle)
+  - Public repositories are readable anonymously. Private, internal, and unclassified repositories, raw job logs, and job restart mutations are only accessible when authenticated via either:
+    1. **Invite-bound GitHub OAuth2 Session (`oauth2-proxy` + Nginx `auth_request`)**: Nginx validates the `_muconsole_oauth2` cookie against `http://127.0.0.1:4180/oauth2/auth`, extracts `X-Auth-Request-User` into `X-Forwarded-User: <github_login>`, and attaches the shared `X-Proxy-Secret` header. `ActionRunner-controller` verifies `X-Proxy-Secret` in constant time and grants operator access only if `<github_login>` has redeemed a one-time invite token (`invite_bound: true`).
+    1. **API Key (`ACTION_RUNNER_LOG_API_KEY`)**: `Authorization: Bearer <key>` or `X-Api-Key: <key>` (fails closed when unset).
+  - Anonymous requests or uninvited GitHub accounts receive `404` on private repositories and `401` / `403` on raw job logs and job restart mutations.
 - **CD Endpoints (`MuConDe-controller`)**:
   - `GET /api/cd/deployments?repo={owner}/{repo}&limit={N}`
   - `GET /api/cd/deployments/{id}/gate`
@@ -32,6 +38,64 @@ All JSON field names and enum variants use `snake_case`, timestamps are Unix epo
   - `GET /api/obs/v1/metrics/timeseries`
   - `GET /api/obs/v1/store/status`
   - Read-only (`GET`/`HEAD`) reverse-proxied from `/api/obs/` (and `/api/observe/`) to `http://127.0.0.1:9095/api/`. All log and span messages are sanitized via `sanitize_public_log` (`192.168.###.` IP masking and private hostname redaction).
+
+______________________________________________________________________
+
+## 1.5 Invite-Only GitHub Authentication Endpoints (`ActionRunner-controller`)
+
+### `GET /api/auth/session`
+
+Returns the caller's authentication and invite-binding state (`AuthSessionDto`). Safe to call anonymously on startup.
+
+```json
+{
+  "authenticated": true,
+  "github_login": "operator-one",
+  "invite_bound": true,
+  "role": "operator"
+}
+```
+
+| State                       | `authenticated` | `github_login`   | `invite_bound` | `role`                    | UI `AuthState`              |
+| --------------------------- | --------------- | ---------------- | -------------- | ------------------------- | --------------------------- |
+| Anonymous                   | `false`         | `null`           | `false`        | `null`                    | `AuthState::Anonymous`      |
+| GitHub signed in, uninvited | `false`         | `"guest-user"`   | `false`        | `null`                    | `AuthState::InviteRequired` |
+| Invited operator / admin    | `true`          | `"operator-one"` | `true`         | `"operator"` \| `"admin"` | `AuthState::Operator`       |
+
+### `POST /api/auth/redeem`
+
+Redeems a one-time invite token (`?invite=<token>`) and permanently binds the caller's `X-Forwarded-User` GitHub login as an operator. Requires an active `oauth2-proxy` GitHub session (`auth_request /oauth2/auth`).
+
+Request:
+
+```json
+{
+  "token": "inv_019a4f8c_secret"
+}
+```
+
+Response (`200 OK`):
+
+```json
+{
+  "authenticated": true,
+  "github_login": "operator-one",
+  "invite_bound": true,
+  "role": "operator"
+}
+```
+
+### `POST /api/auth/invites` & `GET /api/auth/invites`
+
+Admin-only endpoints for minting, listing, and revoking one-time operator invite tokens.
+
+```json
+{
+  "role": "operator",
+  "ttl_seconds": 86400,
+  "note": "On-call operator invite"
+}
+```
 
 ______________________________________________________________________
 

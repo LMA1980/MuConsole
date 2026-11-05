@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# MuConsole oauth2-proxy Configuration Example (GitHub OAuth2 Identity + Invite Gate)
+#
+# Architecture:
+# 1. oauth2-proxy listens on loopback (127.0.0.1:4180) behind Nginx and handles
+#    the GitHub OAuth2 authorization code flow (`scope = "read:user"`).
+# 2. Because GitHub OAuth Apps allow any GitHub account to complete the OAuth
+#    handshake unless restricted to an organization, `oauth2-proxy` authenticates
+#    *which* GitHub login is present and emits `X-Auth-Request-User: <github_login>`
+#    on internal `/oauth2/auth` subrequests.
+# 3. Nginx forwards `X-Forwarded-User: <github_login>` alongside the shared
+#    `X-Proxy-Secret` header to `ActionRunner-controller` (`http://192.0.2.10:8000`).
+# 4. `ActionRunner-controller` enforces the invite-only authorization boundary:
+#    a GitHub login only gains operator privileges (private repo visibility,
+#    raw job logs, and job restart mutations) after redeeming a one-time
+#    cryptographic invite token via `POST /api/auth/redeem`.
+
+http_address = "127.0.0.1:4180"
+reverse_proxy = true
+
+provider = "github"
+scope = "read:user"
+client_id = "REPLACE_WITH_GITHUB_OAUTH_CLIENT_ID"
+client_secret = "REPLACE_WITH_GITHUB_OAUTH_CLIENT_SECRET"
+redirect_url = "https://console.lma1980.duckdns.org/oauth2/callback"
+
+cookie_name = "_muconsole_oauth2"
+cookie_secret = "REPLACE_WITH_32_BYTE_BASE64_COOKIE_SECRET"
+cookie_secure = true
+cookie_httponly = true
+cookie_samesite = "lax"
+
+set_xauthrequest = true
+email_domains = ["*"]
+upstreams = ["static://202"]

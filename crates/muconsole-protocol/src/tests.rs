@@ -207,6 +207,16 @@ fn gen_view(r: &mut Rng) -> ViewModel {
         sandboxes: Vec::new(),
         registry: RegistryView::default(),
         observe: ObserveView::default(),
+        auth: match r.below(3) {
+            0 => AuthState::Anonymous,
+            1 => AuthState::InviteRequired {
+                github_login: r.name("guest-", 4),
+            },
+            _ => AuthState::Operator {
+                github_login: r.name("op-", 4),
+                role: r.coin().then(|| "operator".into()),
+            },
+        },
     }
 }
 
@@ -418,5 +428,62 @@ fn subviews_round_trip_and_step_within_area() {
             let prev = next.step(-1);
             assert_eq!(prev, sv);
         }
+    }
+}
+
+#[test]
+fn auth_state_and_commands_round_trip_through_postcard() {
+    use crate::dto::AuthSessionDto;
+
+    let anon = AuthState::from_session(&AuthSessionDto::default());
+    assert_eq!(anon, AuthState::Anonymous);
+    assert!(!anon.is_operator());
+    assert_eq!(anon.badge_label(), "READ-ONLY");
+
+    let uninvited = AuthState::from_session(&AuthSessionDto {
+        authenticated: false,
+        github_login: Some("guest-dev".into()),
+        invite_bound: false,
+        role: None,
+    });
+    assert_eq!(
+        uninvited,
+        AuthState::InviteRequired {
+            github_login: "guest-dev".into()
+        }
+    );
+    assert!(!uninvited.is_operator());
+    assert_eq!(uninvited.badge_label(), "INVITE REQ (@guest-dev)");
+
+    let op = AuthState::from_session(&AuthSessionDto {
+        authenticated: true,
+        github_login: Some("LMA1980".into()),
+        invite_bound: true,
+        role: Some("admin".into()),
+    });
+    assert_eq!(
+        op,
+        AuthState::Operator {
+            github_login: "LMA1980".into(),
+            role: Some("admin".into()),
+        }
+    );
+    assert!(op.is_operator());
+    assert_eq!(op.badge_label(), "@LMA1980");
+
+    for cmd in [
+        UiCommand::RedeemInvite {
+            token: "inv_019a_secret".into(),
+        },
+        UiCommand::SetAuthSession(AuthSessionDto {
+            authenticated: true,
+            github_login: Some("LMA1980".into()),
+            invite_bound: true,
+            role: Some("operator".into()),
+        }),
+        UiCommand::RestartJob { job_id: 42 },
+    ] {
+        let bytes = encode(&cmd).expect("encode cmd");
+        assert_eq!(decode::<UiCommand>(&bytes), Ok(cmd));
     }
 }

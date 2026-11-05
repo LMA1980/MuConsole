@@ -560,3 +560,79 @@ fn engine_handles_unknown_scenarios_routes_and_wire_errors() {
     let good_frame = encode(&UiCommand::Retry).expect("encode");
     assert!(!eng.handle_frame(&good_frame, 70).is_empty());
 }
+
+#[test]
+fn auth_session_probe_and_invite_redemption_emit_auth_delta_and_refresh_repos() {
+    use muconsole_protocol::dto::AuthSessionDto;
+    use muconsole_protocol::{AuthState, Delta};
+
+    let mut eng = Engine::new(11);
+    let mut mirror = None;
+
+    let fx = eng.handle(UiCommand::Configure(WorkerConfig::default()), 0);
+    assert!(fx.contains(&Effect::Fetch {
+        kind: FetchKind::AuthSession,
+        url: "/api/auth/session".into(),
+    }));
+    eng.on_fetch(&FetchKind::Repos, Ok(REPOS.into()), 10);
+    let fx = eng.tick(100);
+    drain_view_events(&fx, &mut mirror);
+    assert_eq!(
+        mirror.as_ref().map(|v| &v.auth),
+        Some(&AuthState::Anonymous)
+    );
+
+    // Uninvited GitHub user session transitions view.auth to InviteRequired.
+    let uninvited_json =
+        r#"{"authenticated":false,"github_login":"guest-user","invite_bound":false,"role":null}"#;
+    eng.on_fetch(&FetchKind::AuthSession, Ok(uninvited_json.into()), 110);
+    let fx = eng.tick(200);
+    assert!(fx.iter().any(|e| matches!(
+        e,
+        Effect::Post(DataEvent::Patch(deltas))
+            if deltas.contains(&Delta::Auth(AuthState::InviteRequired {
+                github_login: "guest-user".into()
+            }))
+    )));
+    drain_view_events(&fx, &mut mirror);
+
+    // Redeeming a valid invite token issues FetchKind::AuthRedeem, transitions to Operator,
+    // and refreshes /api/repos so private repos become visible.
+    let fx = eng.handle(
+        UiCommand::RedeemInvite {
+            token: "inv_019a4f8c_secret".into(),
+        },
+        210,
+    );
+    assert!(fx.contains(&Effect::Fetch {
+        kind: FetchKind::AuthRedeem("inv_019a4f8c_secret".into()),
+        url: "/api/auth/redeem".into(),
+    }));
+
+    let redeemed_json = r#"{"authenticated":true,"github_login":"guest-user","invite_bound":true,"role":"operator"}"#;
+    let fx = eng.on_fetch(
+        &FetchKind::AuthRedeem("inv_019a4f8c_secret".into()),
+        Ok(redeemed_json.into()),
+        220,
+    );
+    assert!(fx.iter().any(|e| matches!(
+        e,
+        Effect::Fetch {
+            kind: FetchKind::Repos,
+            ..
+        }
+    )));
+    let fx = eng.tick(350);
+    drain_view_events(&fx, &mut mirror);
+    assert_eq!(
+        mirror.as_ref().map(|v| &v.auth),
+        Some(&AuthState::Operator {
+            github_login: "guest-user".into(),
+            role: Some("operator".into()),
+        })
+    );
+
+    // Direct SetAuthSession command also updates Store.auth.
+    eng.handle(UiCommand::SetAuthSession(AuthSessionDto::default()), 360);
+    assert_eq!(eng.store().auth(), &AuthState::Anonymous);
+}

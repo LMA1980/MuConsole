@@ -2,11 +2,11 @@
 //! REST and SSE payload decoding into store [`Input`]s.
 
 use muconsole_protocol::dto::{
-    BranchCreatedDto, BranchDeletedDto, CanaryBundleDto, CasStatusDto, DeploymentDto, GateDto,
-    ItProgressDto, JobStageChangedDto, LeaseDto, LeaseExpiredDto, MetricSeriesDto,
-    NodeMembershipChangedDto, OtelLogDto, PackageDto, PrStateChangedDto, ProblemDto, PromotedDto,
-    RepoDto, RepoListResponseDto, RepoSummaryDto, RolledBackDto, SmartscapeDto, StoreStatusDto,
-    TaintedDto, TopologyDto, TraceDto,
+    AuthSessionDto, BranchCreatedDto, BranchDeletedDto, CanaryBundleDto, CasStatusDto,
+    DeploymentDto, GateDto, ItProgressDto, JobStageChangedDto, LeaseDto, LeaseExpiredDto,
+    MetricSeriesDto, NodeMembershipChangedDto, OtelLogDto, PackageDto, PrStateChangedDto,
+    ProblemDto, PromotedDto, RepoDto, RepoListResponseDto, RepoSummaryDto, RolledBackDto,
+    SmartscapeDto, StoreStatusDto, TaintedDto, TopologyDto, TraceDto,
 };
 use muconsole_protocol::{CdLease, RepoId};
 use serde::de::DeserializeOwned;
@@ -33,7 +33,12 @@ pub enum FetchKind {
     ObsLogs,
     ObsMetrics,
     ObsStoreStatus,
+    AuthSession,
+    AuthRedeem(String),
 }
+
+/// Alias for [`FetchKind`] used by protocol consumers.
+pub type Endpoint = FetchKind;
 
 /// Which SSE stream an event came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -59,6 +64,14 @@ impl StreamId {
 
 fn json<T: DeserializeOwned>(body: &str) -> Result<T, String> {
     serde_json::from_str(body).map_err(|e| e.to_string())
+}
+
+/// Decode a `/api/auth/session` or `/api/auth/redeem` JSON body.
+///
+/// # Errors
+/// Returns the JSON error message when the payload is malformed.
+pub fn parse_auth_session(bytes: &[u8]) -> Result<AuthSessionDto, String> {
+    serde_json::from_slice(bytes).map_err(|e| e.to_string())
 }
 
 #[derive(Deserialize)]
@@ -115,6 +128,9 @@ pub fn parse_fetch(kind: &FetchKind, body: &str) -> Result<Input, String> {
         FetchKind::ObsLogs => Input::ObsLogs(json::<Vec<OtelLogDto>>(body)?),
         FetchKind::ObsMetrics => Input::ObsMetrics(json::<Vec<MetricSeriesDto>>(body)?),
         FetchKind::ObsStoreStatus => Input::ObsStoreStatus(json::<StoreStatusDto>(body)?),
+        FetchKind::AuthSession | FetchKind::AuthRedeem(_) => {
+            Input::AuthSession(parse_auth_session(body.as_bytes())?)
+        }
     })
 }
 

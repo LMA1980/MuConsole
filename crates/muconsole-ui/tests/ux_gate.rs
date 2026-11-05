@@ -1,23 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-//! Automated UX Validation Gate (`U1`–`U8`) for Milestone 6 (`WireframeSkin`,
-//! 5 Areas × 17 Sub-Views, C2 Repo/Submodule Stepper, `SubViewBar`,
-//! `Hurmit` ↔ `OpenDyslexicM` toggle, keyboard/DOM/deep-link parity,
-//! cross-area `[TRACE ↗]` / `[CD GATE ↗]` routing, and public privacy boundary).
+//! Automated UX Validation Gate (`U1`–`U8`) for Milestone 6 & Milestone 7
+//! (`WireframeSkin`, 5 Areas × 17 Sub-Views, C2 Repo/Submodule Stepper,
+//! `SubViewBar`, `Hurmit` ↔ `OpenDyslexicM` toggle, keyboard/DOM/deep-link
+//! parity, cross-area `[TRACE ↗]` / `[CD GATE ↗]` routing, public privacy
+//! boundary, and invite-only GitHub operator authentication gating).
 #![cfg(not(miri))]
 
 use muconsole_data::engine::{Effect, Engine};
 use muconsole_data::scenario::Scenario;
 use muconsole_layout::{Breakpoint, SafeArea, Viewport};
 use muconsole_protocol::{
-    Area, Branch, CdSubView, CiSubView, CrtFont, DataEvent, Delta, GateTest, ObserveSubView,
-    PrState, RegistrySubView, RepoId, RepoScore, RepoStatus, SidingPhase, SubView, SubmoduleId,
-    TestState, UiCommand, WorkerConfig,
+    Area, AuthState, Branch, CdSubView, CiSubView, CrtFont, DataEvent, Delta, GateTest,
+    ObserveSubView, PrState, RegistrySubView, RepoId, RepoScore, RepoStatus, SidingPhase, SubView,
+    SubmoduleId, TestState, UiCommand, WorkerConfig,
 };
 use muconsole_theme::interaction::SwitchEvent;
 use muconsole_theme::wireframe::{AvionicsSkin, WireframeSkin};
 use muconsole_ui::components::{render_console, render_html_shell};
 use muconsole_ui::router::{breadcrumb_segments, escape_up, format_hash, parse_hash};
-use muconsole_ui::state::{font_slug, parse_font_pref, ConsoleState, ROTARY_SETTLE_MS};
+use muconsole_ui::state::{
+    extract_invite_token, font_slug, parse_font_pref, ConsoleState, ROTARY_SETTLE_MS,
+};
 
 const VIEWPORTS: [(f64, f64); 6] = [
     (1920.0, 1080.0),
@@ -779,4 +782,111 @@ fn u8_cross_area_trace_and_cd_gate_deep_links_and_observe_registry_subviews() {
     assert_eq!(st.route.area, Area::Cd);
     assert_eq!(st.route.subview, SubView::Cd(CdSubView::IntegrationGate));
     assert_eq!(cmds_cd.len(), 2);
+}
+
+#[test]
+fn u8_operator_auth_states_invite_capture_and_log_restart_gating() {
+    // 1. Invite query extraction and URL sanitization.
+    assert_eq!(
+        extract_invite_token("?invite=inv_019a_secret&font=dyslexic"),
+        (Some("inv_019a_secret".into()), "?font=dyslexic".to_owned())
+    );
+    assert_eq!(
+        extract_invite_token("?invite=inv_only"),
+        (Some("inv_only".into()), String::new())
+    );
+    assert_eq!(
+        extract_invite_token("?font=hurmit"),
+        (None, "?font=hurmit".to_owned())
+    );
+
+    let mut st = state_for_scenario(
+        Scenario::ItCriticalFailure,
+        SubView::Cd(CdSubView::IntegrationGate),
+        CrtFont::Hurmit,
+    );
+    st.init_from_env("#/cd", "?invite=inv_boot_123", None);
+    assert_eq!(st.pending_invite.as_deref(), Some("inv_boot_123"));
+
+    // 2. AuthState::Anonymous gates raw execution logs and Trainway restart mutations.
+    let anon_patch =
+        Engine::encode_event(&DataEvent::Patch(vec![Delta::Auth(AuthState::Anonymous)]))
+            .expect("encode");
+    st.on_worker_frame(&anon_patch);
+    assert!(!st.is_operator());
+
+    let svg_anon = render_console(
+        &WireframeSkin,
+        &st,
+        Viewport::new(1512.0, 860.0),
+        SafeArea::ZERO,
+    );
+    let html_anon = render_html_shell(&svg_anon, &st);
+    assert!(svg_anon.contains("c2-auth-status"));
+    assert!(svg_anon.contains("READ-ONLY · SIGN IN"));
+    assert!(svg_anon.contains("c6-log-auth-gate"));
+    assert!(svg_anon.contains("RAW LOGS &amp; RESTART REQUIRE OPERATOR SESSION"));
+    assert!(html_anon.contains("href=\"/oauth2/start?rd=/\""));
+    assert!(html_anon.contains("data-auth-state=\"anonymous\""));
+    assert_svg_zero_overflow(&svg_anon, 1512.0, 860.0, "u8_anonymous");
+
+    // Restart switch refuses to arm or fire while anonymous.
+    st.on_restart_switch(SwitchEvent::Press { at_ms: 1_000 }, 1_000);
+    assert_eq!(
+        st.on_restart_switch(
+            SwitchEvent::Rotate {
+                to: 1,
+                at_ms: 1_500,
+                shift: true
+            },
+            1_500
+        ),
+        None
+    );
+    assert!(st.restart_armed_until_ms.is_none());
+    assert!(st
+        .aria_assertive
+        .contains("RAW LOGS & JOB RESTART REQUIRE INVITED GITHUB OPERATOR SESSION"));
+
+    // 3. AuthState::InviteRequired shows @login and keeps raw logs/restart gated.
+    let uninv_patch = Engine::encode_event(&DataEvent::Patch(vec![Delta::Auth(
+        AuthState::InviteRequired {
+            github_login: "guest-user".into(),
+        },
+    )]))
+    .expect("encode");
+    st.on_worker_frame(&uninv_patch);
+    assert!(!st.is_operator());
+    let svg_uninv = render_console(
+        &WireframeSkin,
+        &st,
+        Viewport::new(1512.0, 860.0),
+        SafeArea::ZERO,
+    );
+    let html_uninv = render_html_shell(&svg_uninv, &st);
+    assert!(svg_uninv.contains("INVITE REQ (@guest-user)"));
+    assert!(html_uninv.contains("data-auth-state=\"invite_required\""));
+    assert!(html_uninv.contains("href=\"/oauth2/sign_out?rd=/\""));
+    assert_svg_zero_overflow(&svg_uninv, 1512.0, 860.0, "u8_invite_required");
+
+    // 4. AuthState::Operator unlocks raw execution logs and Trainway restart.
+    let op_patch =
+        Engine::encode_event(&DataEvent::Patch(vec![Delta::Auth(AuthState::Operator {
+            github_login: "LMA1980".into(),
+            role: Some("admin".into()),
+        })]))
+        .expect("encode");
+    st.on_worker_frame(&op_patch);
+    assert!(st.is_operator());
+    let svg_op = render_console(
+        &WireframeSkin,
+        &st,
+        Viewport::new(1512.0, 860.0),
+        SafeArea::ZERO,
+    );
+    let html_op = render_html_shell(&svg_op, &st);
+    assert!(svg_op.contains("@LMA1980 · OPERATOR"));
+    assert!(!svg_op.contains("c6-log-auth-gate"));
+    assert!(html_op.contains("data-auth-state=\"operator\""));
+    assert_svg_zero_overflow(&svg_op, 1512.0, 860.0, "u8_operator");
 }

@@ -258,6 +258,7 @@ fn classification_boundaries() {
 
 #[test]
 fn sweep_never_overflows() {
+    // Every size between a small phone and a large desktop, both fonts.
     let w_step = if cfg!(miri) { 447.0 } else { 37.0 };
     let h_step = if cfg!(miri) { 323.0 } else { 23.0 };
     let mut w = 320.0;

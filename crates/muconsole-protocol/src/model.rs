@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use crate::config::WorkerConfig;
+use crate::dto::AuthSessionDto;
 use crate::view::{AreaBadges, DataSource, Delta, ViewModel};
 
 /// Top-level console area (5 rail positions: `CI`, `CD`, `REG`, `OBS`, `FLT`).
@@ -365,6 +366,16 @@ pub enum UiCommand {
         hidden: bool,
     },
     SetCrtFont(CrtFont),
+    /// Redeem a one-time operator invite token (`POST /api/auth/redeem`).
+    RedeemInvite {
+        token: String,
+    },
+    /// Directly set the operator authentication session state.
+    SetAuthSession(AuthSessionDto),
+    /// Restart / retry a specific CI job (`POST /jobs/{id}/restart`).
+    RestartJob {
+        job_id: u64,
+    },
 }
 
 /// Connection state of the worker's upstream streams.

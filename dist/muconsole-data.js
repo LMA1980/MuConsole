@@ -182,6 +182,9 @@ let wasm_bindgen = (function(exports) {
             __wbg_set_af5932e3f78b5648: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4) {
                 arg0.set(getStringFromWasm0(arg1, arg2), getStringFromWasm0(arg3, arg4));
             }, arguments); },
+            __wbg_set_body_1fb0f1008bfc7df6: function(arg0, arg1) {
+                arg0.body = arg1;
+            },
             __wbg_set_cache_7507c4cc5938ccc7: function(arg0, arg1) {
                 arg0.cache = __wbindgen_enum_RequestCache[arg1];
             },
