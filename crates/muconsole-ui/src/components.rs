@@ -3351,24 +3351,26 @@ fn render_fleet_sandbox_profiles(
 pub fn render_html_shell(svg: &str, state: &ConsoleState) -> String {
     let font_attr = font_slug(state.font);
     let dyslexic_face = if state.lazy_dyslexic_loaded {
-        "@font-face{font-family:'OpenDyslexicM Nerd Font Mono';src:url('./fonts/OpenDyslexicMNerdFontMono-Regular.woff2') format('woff2');font-display:swap;}"
+        "@font-face{font-family:'OpenDyslexicM Nerd Font Mono';src:url('/fonts/OpenDyslexicMNerdFontMono-Regular.woff2') format('woff2');font-display:swap;}"
     } else {
         ""
     };
+    let sign_in_url = state.sign_in_href();
+    let sign_out_url = state.sign_out_href();
     let (auth_slug, auth_href, auth_label) = match state.auth() {
         AuthState::Anonymous => (
             "anonymous",
-            "/oauth2/start?rd=/",
+            sign_in_url.as_str(),
             "READ-ONLY · SIGN IN".to_owned(),
         ),
         AuthState::InviteRequired { github_login } => (
             "invite_required",
-            "/oauth2/sign_out?rd=/",
+            sign_out_url.as_str(),
             format!("INVITE REQ (@{github_login})"),
         ),
         AuthState::Operator { github_login, .. } => (
             "operator",
-            "/oauth2/sign_out?rd=/",
+            sign_out_url.as_str(),
             format!("@{github_login} · OPERATOR"),
         ),
     };

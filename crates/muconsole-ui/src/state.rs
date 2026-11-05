@@ -61,6 +61,73 @@ pub fn extract_invite_token(query: &str) -> (Option<String>, String) {
     (token, clean)
 }
 
+/// Percent-encode a string for use in query parameter values (RFC 3986).
+#[must_use]
+pub fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                use std::fmt::Write;
+                let _ = write!(out, "%{:02X}", b);
+            }
+        }
+    }
+    out
+}
+
+/// Format a sign-in URL with a strictly formatted and percent-encoded `?rd=` return parameter.
+#[must_use]
+pub fn format_sign_in_url(rd: &str) -> String {
+    if rd == "/" {
+        "/oauth2/start?rd=/".to_string()
+    } else {
+        format!("/oauth2/start?rd={}", percent_encode(rd))
+    }
+}
+
+/// Format a sign-out URL with a strictly formatted and percent-encoded `?rd=` return parameter.
+#[must_use]
+pub fn format_sign_out_url(rd: &str) -> String {
+    if rd == "/" {
+        "/oauth2/sign_out?rd=/".to_string()
+    } else {
+        format!("/oauth2/sign_out?rd={}", percent_encode(rd))
+    }
+}
+
+/// Validate that a sign-in `href` has a valid query format with `=`.
+/// Rejects malformed patterns such as `?rdhttps:` missing `=`.
+pub fn validate_sign_in_href(href: &str) -> Result<(), &'static str> {
+    let Some((path, query)) = href.split_once('?') else {
+        return Err("missing query string");
+    };
+    if path != "/oauth2/start" {
+        return Err("invalid path, expected /oauth2/start");
+    }
+    let mut has_rd = false;
+    for pair in query.split('&') {
+        if let Some((k, v)) = pair.split_once('=') {
+            if k == "rd" {
+                if v.is_empty() {
+                    return Err("empty rd parameter");
+                }
+                has_rd = true;
+            }
+        } else if pair.starts_with("rd") {
+            return Err("malformed rd parameter missing '='");
+        }
+    }
+    if has_rd {
+        Ok(())
+    } else {
+        Err("missing rd parameter")
+    }
+}
+
 /// Parse `?font=dyslexic|hurmit` or stored `localStorage` value.
 #[must_use]
 pub fn parse_font_pref(query: &str, stored: Option<&str>) -> CrtFont {
@@ -162,6 +229,8 @@ pub struct ConsoleState {
     pub aria_assertive: String,
     /// One-time invite token captured from `?invite=<token>` or `sessionStorage`.
     pub pending_invite: Option<String>,
+    /// Target URL for pending client-side or browser navigation.
+    pub pending_navigation: Option<String>,
 }
 
 impl Default for ConsoleState {
@@ -215,6 +284,7 @@ impl ConsoleState {
             aria_polite: String::new(),
             aria_assertive: String::new(),
             pending_invite: None,
+            pending_navigation: None,
         }
     }
 
@@ -306,6 +376,18 @@ impl ConsoleState {
     #[must_use]
     pub fn is_operator(&self) -> bool {
         self.auth().is_operator()
+    }
+
+    /// Return the formatted sign-in URL.
+    #[must_use]
+    pub fn sign_in_href(&self) -> String {
+        format_sign_in_url("/")
+    }
+
+    /// Return the formatted sign-out URL.
+    #[must_use]
+    pub fn sign_out_href(&self) -> String {
+        format_sign_out_url("/")
     }
 
     /// Active font metrics (`HURMIT` or `OPEN_DYSLEXIC`).
@@ -811,6 +893,15 @@ impl ConsoleState {
             "c6-log-pager" => {
                 self.log_page = self.log_page.wrapping_add(1);
                 Vec::new()
+            }
+            "c2-auth-status" => {
+                let href = match self.auth() {
+                    AuthState::Anonymous => self.sign_in_href(),
+                    _ => self.sign_out_href(),
+                };
+                self.pending_navigation = Some(href.clone());
+                self.aria_polite = format!("Navigating to {href}");
+                vec![UiCommand::Navigate { href }]
             }
             _ => Vec::new(),
         }

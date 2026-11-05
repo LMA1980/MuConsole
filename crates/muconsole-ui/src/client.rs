@@ -11,9 +11,9 @@ use muconsole_protocol::{
     UiError, ViewModel,
 };
 
-/// Relative URL of the worker loader shim emitted by Trunk
+/// Root-absolute URL of the worker loader shim emitted by Trunk or build-dist.sh
 /// (`data-type="worker" data-loader-shim`).
-pub const WORKER_URL: &str = "./muconsole-data_loader.js";
+pub const WORKER_URL: &str = "/muconsole-data_loader.js";
 
 /// What changed after a frame was handled.
 #[derive(Debug, Clone, PartialEq, Eq)]

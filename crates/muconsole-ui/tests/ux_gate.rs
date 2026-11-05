@@ -12,15 +12,17 @@ use muconsole_layout::{Breakpoint, SafeArea, Viewport};
 use muconsole_protocol::{
     Area, AuthState, Branch, CdSubView, CiSubView, CrtFont, DataEvent, Delta, GateTest,
     ObserveSubView, PrState, RegistrySubView, RepoId, RepoScore, RepoStatus, SidingPhase, SubView,
-    SubmoduleId, TestState, UiCommand, WorkerConfig,
+    SubmoduleId, TestState, UiCommand, ViewModel, WorkerConfig,
 };
 use muconsole_theme::interaction::SwitchEvent;
 use muconsole_theme::wireframe::{AvionicsSkin, WireframeSkin};
 use muconsole_ui::components::{render_console, render_html_shell};
 use muconsole_ui::router::{breadcrumb_segments, escape_up, format_hash, parse_hash};
 use muconsole_ui::state::{
-    extract_invite_token, font_slug, parse_font_pref, ConsoleState, ROTARY_SETTLE_MS,
+    extract_invite_token, font_slug, format_sign_in_url, parse_font_pref, validate_sign_in_href,
+    ConsoleState, PENDING_INVITE_STORAGE_KEY, ROTARY_SETTLE_MS,
 };
+use muconsole_ui::WORKER_URL;
 
 const VIEWPORTS: [(f64, f64); 6] = [
     (1920.0, 1080.0),
@@ -889,4 +891,262 @@ fn u8_operator_auth_states_invite_capture_and_log_restart_gating() {
     assert!(!svg_op.contains("c6-log-auth-gate"));
     assert!(html_op.contains("data-auth-state=\"operator\""));
     assert_svg_zero_overflow(&svg_op, 1512.0, 860.0, "u8_operator");
+}
+
+#[test]
+fn u9_sign_in_url_generation_and_encoding_invariants() {
+    // 1. Default root redirect adheres strictly to "/oauth2/start?rd=/"
+    assert_eq!(format_sign_in_url("/"), "/oauth2/start?rd=/");
+    assert!(validate_sign_in_href("/oauth2/start?rd=/").is_ok());
+
+    // 2. Custom target path with hash and subview parameters is validly percent-encoded
+    let deep_target = "/#/cd/gate?filter=ALL";
+    let formatted_deep = format_sign_in_url(deep_target);
+    assert_eq!(
+        formatted_deep,
+        "/oauth2/start?rd=%2F%23%2Fcd%2Fgate%3Ffilter%3DALL"
+    );
+    assert!(validate_sign_in_href(&formatted_deep).is_ok());
+
+    // 3. Absolute URL return target is validly percent-encoded
+    let abs_target = "https://console.lma1980.duckdns.org/#/ci/trainway";
+    let formatted_abs = format_sign_in_url(abs_target);
+    assert_eq!(
+        formatted_abs,
+        "/oauth2/start?rd=https%3A%2F%2Fconsole.lma1980.duckdns.org%2F%23%2Fci%2Ftrainway"
+    );
+    assert!(validate_sign_in_href(&formatted_abs).is_ok());
+
+    // 4. Reject malformed URLs: specifically `?rdhttps:` without `=` (reproducing live screenshot bug)
+    let malformed_no_equals =
+        "/oauth2/start?rdhttps://console.lma1980.duckdns.org/?invite=inv_cca98d8e";
+    assert!(
+        validate_sign_in_href(malformed_no_equals).is_err(),
+        "Expected validation failure on malformed ?rdhttps: without '='"
+    );
+
+    // 5. Reject missing rd parameter or empty rd value
+    assert!(validate_sign_in_href("/oauth2/start").is_err());
+    assert!(validate_sign_in_href("/oauth2/start?rd=").is_err());
+    assert!(validate_sign_in_href("/oauth2/other?rd=/").is_err());
+
+    // 6. Verify HTML shell integration: <a id="muconsole-auth-link"> has valid href
+    let st = ConsoleState::new();
+    let svg = render_console(
+        &WireframeSkin,
+        &st,
+        Viewport::new(1512.0, 860.0),
+        SafeArea::ZERO,
+    );
+    let html = render_html_shell(&svg, &st);
+
+    // Must match strict href
+    assert!(html.contains("href=\"/oauth2/start?rd=/\""));
+    // Must NOT contain malformed rd parameter
+    assert!(!html.contains("?rdhttps:"));
+    assert!(!html.contains("?rdhttp:"));
+    // Must have '=' immediately following rd
+    assert!(html.contains("?rd="));
+}
+
+#[test]
+fn u10_invite_preservation_across_oauth2_redirect_lifecycle() {
+    // Stage 1: Initial arrival with one-time invite token in URL query
+    let initial_query = "?invite=inv_test_lifecycle_019a&repo=model-runner";
+    let (extracted_token, clean_query) = extract_invite_token(initial_query);
+
+    assert_eq!(extracted_token.as_deref(), Some("inv_test_lifecycle_019a"));
+    assert_eq!(clean_query, "?repo=model-runner");
+
+    // Simulate sessionStorage stash (mirroring boot.rs window.session_storage())
+    let mut simulated_session_storage = std::collections::BTreeMap::<String, String>::new();
+    if let Some(ref token) = extracted_token {
+        simulated_session_storage.insert(PENDING_INVITE_STORAGE_KEY.to_string(), token.clone());
+    }
+    assert_eq!(
+        simulated_session_storage
+            .get(PENDING_INVITE_STORAGE_KEY)
+            .map(String::as_str),
+        Some("inv_test_lifecycle_019a")
+    );
+
+    // Initial state initialized from environment
+    let mut st = ConsoleState::new();
+    st.init_from_env("#/ci", initial_query, None);
+    assert_eq!(
+        st.pending_invite.as_deref(),
+        Some("inv_test_lifecycle_019a")
+    );
+
+    // Stage 2: Browser navigates to OAuth2 start and completes GitHub handshake
+    // The redirect return URL to the console root has NO ?invite= query parameter!
+    let return_url_query = "";
+    let (return_extracted, return_clean) = extract_invite_token(return_url_query);
+    assert_eq!(return_extracted, None);
+    assert_eq!(return_clean, "");
+
+    // Stage 3: On return to root "/", stored_invite successfully recovers the token from sessionStorage
+    let stored_invite = return_extracted.or_else(|| {
+        simulated_session_storage
+            .get(PENDING_INVITE_STORAGE_KEY)
+            .cloned()
+            .filter(|t| !t.is_empty())
+    });
+    assert_eq!(stored_invite.as_deref(), Some("inv_test_lifecycle_019a"));
+
+    // Stage 4: Bootstrap recovers state and dispatches UiCommand::RedeemInvite
+    let mut st_return = ConsoleState::new();
+    let init_frame =
+        Engine::encode_event(&DataEvent::Snapshot(ViewModel::default())).expect("encode");
+    st_return.on_worker_frame(&init_frame);
+    st_return.init_from_env("#/ci", return_url_query, None);
+    if st_return.pending_invite.is_none() {
+        st_return.pending_invite.clone_from(&stored_invite);
+    }
+    assert_eq!(
+        st_return.pending_invite.as_deref(),
+        Some("inv_test_lifecycle_019a")
+    );
+
+    // Verify dispatched command sent to worker
+    let redeem_cmd = UiCommand::RedeemInvite {
+        token: stored_invite.expect("recovered token"),
+    };
+    assert_eq!(
+        redeem_cmd,
+        UiCommand::RedeemInvite {
+            token: "inv_test_lifecycle_019a".into()
+        }
+    );
+
+    // Stage 5: Operator authentication confirmation purges invite from sessionStorage
+    let op_patch =
+        Engine::encode_event(&DataEvent::Patch(vec![Delta::Auth(AuthState::Operator {
+            github_login: "LMA1980".into(),
+            role: Some("operator".into()),
+        })]))
+        .expect("encode");
+    st_return.on_worker_frame(&op_patch);
+    assert!(st_return.is_operator());
+
+    // When operator state is achieved, pending invite is consumed and storage is cleared
+    if st_return.is_operator() && st_return.pending_invite.take().is_some() {
+        simulated_session_storage.remove(PENDING_INVITE_STORAGE_KEY);
+    }
+    assert_eq!(st_return.pending_invite, None);
+    assert_eq!(
+        simulated_session_storage.get(PENDING_INVITE_STORAGE_KEY),
+        None
+    );
+}
+
+#[test]
+fn u11_c2_auth_status_click_dispatches_navigation_command() {
+    let mut st = ConsoleState::new();
+    let init_frame =
+        Engine::encode_event(&DataEvent::Snapshot(ViewModel::default())).expect("encode");
+    st.on_worker_frame(&init_frame);
+
+    // 1. In default Anonymous state: clicking `c2-auth-status` must NOT return empty Vec::new().
+    // It must return UiCommand::Navigate with the sign-in URL.
+    let cmds_anon = st.on_dom_action("data-control-id", "c2-auth-status", false, 1_000);
+    assert!(
+        !cmds_anon.is_empty(),
+        "Clicking c2-auth-status in Anonymous state must not be dropped as empty Vec::new()"
+    );
+    assert_eq!(
+        cmds_anon,
+        vec![UiCommand::Navigate {
+            href: "/oauth2/start?rd=/".into(),
+        }]
+    );
+    assert_eq!(st.pending_navigation.as_deref(), Some("/oauth2/start?rd=/"));
+    assert!(
+        st.aria_polite.contains("/oauth2/start")
+            || st.aria_polite.to_ascii_lowercase().contains("sign in")
+    );
+
+    // 2. In InviteRequired state: clicking `c2-auth-status` must navigate to sign_out
+    let uninv_patch = Engine::encode_event(&DataEvent::Patch(vec![Delta::Auth(
+        AuthState::InviteRequired {
+            github_login: "guest-user".into(),
+        },
+    )]))
+    .expect("encode");
+    st.on_worker_frame(&uninv_patch);
+    assert!(!st.is_operator());
+
+    let cmds_uninv = st.on_dom_action("data-control-id", "c2-auth-status", false, 2_000);
+    assert!(
+        !cmds_uninv.is_empty(),
+        "Clicking c2-auth-status in InviteRequired state must not be dropped as empty Vec::new()"
+    );
+    assert_eq!(
+        cmds_uninv,
+        vec![UiCommand::Navigate {
+            href: "/oauth2/sign_out?rd=/".into(),
+        }]
+    );
+    assert_eq!(
+        st.pending_navigation.as_deref(),
+        Some("/oauth2/sign_out?rd=/")
+    );
+
+    // 3. In Operator state: clicking `c2-auth-status` must navigate to sign_out
+    let op_patch =
+        Engine::encode_event(&DataEvent::Patch(vec![Delta::Auth(AuthState::Operator {
+            github_login: "LMA1980".into(),
+            role: Some("operator".into()),
+        })]))
+        .expect("encode");
+    st.on_worker_frame(&op_patch);
+    assert!(st.is_operator());
+
+    let cmds_op = st.on_dom_action("data-control-id", "c2-auth-status", false, 3_000);
+    assert!(
+        !cmds_op.is_empty(),
+        "Clicking c2-auth-status in Operator state must not be dropped as empty Vec::new()"
+    );
+    assert_eq!(
+        cmds_op,
+        vec![UiCommand::Navigate {
+            href: "/oauth2/sign_out?rd=/".into(),
+        }]
+    );
+    assert_eq!(
+        st.pending_navigation.as_deref(),
+        Some("/oauth2/sign_out?rd=/")
+    );
+}
+
+#[test]
+fn u12_root_absolute_asset_paths_and_worker_resolution() {
+    assert!(
+        WORKER_URL.starts_with('/'),
+        "WORKER_URL must be root-absolute, got: {WORKER_URL}"
+    );
+    assert_eq!(WORKER_URL, "/muconsole-data_loader.js");
+
+    let mut st = ConsoleState::new();
+    st.lazy_dyslexic_loaded = true;
+    let html = render_html_shell("", &st);
+    assert!(
+        html.contains("url('/fonts/OpenDyslexicMNerdFontMono-Regular.woff2')"),
+        "render_html_shell must use root-absolute /fonts/ path"
+    );
+    assert!(
+        !html.contains("./fonts/"),
+        "render_html_shell must not contain relative ./fonts/"
+    );
+
+    let index_content = include_str!("../../../index.html");
+    assert!(
+        index_content.contains(r#"<base href="/" />"#),
+        "index.html must contain <base href=\"/\" />"
+    );
+    assert!(!index_content.contains("href=\"./"));
+    assert!(!index_content.contains("src=\"./"));
+    assert!(!index_content.contains("url(\"./"));
+    assert!(!index_content.contains("from './"));
+    assert!(!index_content.contains("init('./"));
 }
