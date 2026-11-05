@@ -1,0 +1,15 @@
+[submodule "code/protocol"]
+	path = code/protocol
+	url = https://github.com/LMA1980/mu-console-protocol.git
+[submodule "code/theme"]
+	path = code/theme
+	url = https://github.com/LMA1980/mu-console-theme.git
+[submodule "code/layout"]
+	path = code/layout
+	url = https://github.com/LMA1980/mu-console-layout.git
+[submodule "code/data"]
+	path = code/data
+	url = https://github.com/LMA1980/mu-console-data.git
+[submodule "code/ui"]
+	path = code/ui
+	url = https://github.com/LMA1980/mu-console-ui.git

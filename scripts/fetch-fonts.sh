@@ -77,10 +77,10 @@ if [[ ! -x "${VENV}/bin/pyftsubset" ]]; then
   "${VENV}/bin/pip" install --quiet --disable-pip-version-check "fonttools[woff]==4.*"
 fi
 
-CRT_UNICODES="$(cd "${ROOT}" && cargo run --quiet -p muconsole-theme --bin muconsole-subset-unicodes -- crt)"
-ETCH_UNICODES="$(cd "${ROOT}" && cargo run --quiet -p muconsole-theme --bin muconsole-subset-unicodes -- etch)"
-CRT_REQUIRED="$(cd "${ROOT}" && cargo run --quiet -p muconsole-theme --bin muconsole-subset-unicodes -- crt --required | tr '\n' ' ')"
-ETCH_REQUIRED="$(cd "${ROOT}" && cargo run --quiet -p muconsole-theme --bin muconsole-subset-unicodes -- etch --required | tr '\n' ' ')"
+CRT_UNICODES="$(cd "${ROOT}/code" && cargo run --quiet -p mu-console-theme --bin mu-console-subset-unicodes -- crt)"
+ETCH_UNICODES="$(cd "${ROOT}/code" && cargo run --quiet -p mu-console-theme --bin mu-console-subset-unicodes -- etch)"
+CRT_REQUIRED="$(cd "${ROOT}/code" && cargo run --quiet -p mu-console-theme --bin mu-console-subset-unicodes -- crt --required | tr '\n' ' ')"
+ETCH_REQUIRED="$(cd "${ROOT}/code" && cargo run --quiet -p mu-console-theme --bin mu-console-subset-unicodes -- etch --required | tr '\n' ' ')"
 
 WORK="$(mktemp -d)"
 trap 'rm -rf "${WORK}"' EXIT

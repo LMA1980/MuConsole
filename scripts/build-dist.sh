@@ -9,17 +9,17 @@ if [ ! -f dist/fonts/HurmitNerdFontMono-Regular.woff2 ]; then
     ./scripts/fetch-fonts.sh
 fi
 
-echo "Building muconsole-ui and muconsole-data release WASM binaries..."
-cargo build --target wasm32-unknown-unknown --release -p muconsole-ui -p muconsole-data
+echo "Building mu-console-ui and mu-console-data release WASM binaries..."
+(cd code && cargo build --target wasm32-unknown-unknown --release -p mu-console-ui -p mu-console-data)
 
 echo "Packaging muconsole-ui (main thread) and muconsole-data (worker) with wasm-bindgen..."
 mkdir -p dist
 wasm-bindgen --target web --out-dir dist --out-name muconsole-ui \
-    target/wasm32-unknown-unknown/release/muconsole-ui.wasm
+    code/target/wasm32-unknown-unknown/release/mu-console-ui.wasm
 wasm-bindgen --target no-modules --out-dir dist --out-name muconsole-data \
-    target/wasm32-unknown-unknown/release/muconsole-data.wasm
+    code/target/wasm32-unknown-unknown/release/mu-console-data.wasm
 
-cp crates/muconsole-theme/assets/tokens.css dist/tokens.css
+cp code/theme/assets/tokens.css dist/tokens.css
 
 hash_file() {
     if command -v shasum >/dev/null 2>&1; then
