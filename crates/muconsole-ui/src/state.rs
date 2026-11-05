@@ -89,6 +89,16 @@ pub fn format_sign_in_url(rd: &str) -> String {
     }
 }
 
+/// Format a sign-out URL with a strictly formatted and percent-encoded `?rd=` return parameter.
+#[must_use]
+pub fn format_sign_out_url(rd: &str) -> String {
+    if rd == "/" {
+        "/oauth2/sign_out?rd=/".to_string()
+    } else {
+        format!("/oauth2/sign_out?rd={}", percent_encode(rd))
+    }
+}
+
 /// Validate that a sign-in `href` has a valid query format with `=`.
 /// Rejects malformed patterns such as `?rdhttps:` missing `=`.
 pub fn validate_sign_in_href(href: &str) -> Result<(), &'static str> {
@@ -372,6 +382,12 @@ impl ConsoleState {
     #[must_use]
     pub fn sign_in_href(&self) -> String {
         format_sign_in_url("/")
+    }
+
+    /// Return the formatted sign-out URL.
+    #[must_use]
+    pub fn sign_out_href(&self) -> String {
+        format_sign_out_url("/")
     }
 
     /// Active font metrics (`HURMIT` or `OPEN_DYSLEXIC`).
@@ -881,7 +897,7 @@ impl ConsoleState {
             "c2-auth-status" => {
                 let href = match self.auth() {
                     AuthState::Anonymous => self.sign_in_href(),
-                    _ => "/oauth2/sign_out?rd=/".to_string(),
+                    _ => self.sign_out_href(),
                 };
                 self.pending_navigation = Some(href.clone());
                 self.aria_polite = format!("Navigating to {href}");

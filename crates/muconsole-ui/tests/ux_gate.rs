@@ -22,6 +22,7 @@ use muconsole_ui::state::{
     extract_invite_token, font_slug, format_sign_in_url, parse_font_pref, validate_sign_in_href,
     ConsoleState, PENDING_INVITE_STORAGE_KEY, ROTARY_SETTLE_MS,
 };
+use muconsole_ui::WORKER_URL;
 
 const VIEWPORTS: [(f64, f64); 6] = [
     (1920.0, 1080.0),
@@ -1059,6 +1060,7 @@ fn u11_c2_auth_status_click_dispatches_navigation_command() {
             href: "/oauth2/start?rd=/".into(),
         }]
     );
+    assert_eq!(st.pending_navigation.as_deref(), Some("/oauth2/start?rd=/"));
     assert!(
         st.aria_polite.contains("/oauth2/start")
             || st.aria_polite.to_ascii_lowercase().contains("sign in")
@@ -1085,6 +1087,10 @@ fn u11_c2_auth_status_click_dispatches_navigation_command() {
             href: "/oauth2/sign_out?rd=/".into(),
         }]
     );
+    assert_eq!(
+        st.pending_navigation.as_deref(),
+        Some("/oauth2/sign_out?rd=/")
+    );
 
     // 3. In Operator state: clicking `c2-auth-status` must navigate to sign_out
     let op_patch =
@@ -1107,4 +1113,40 @@ fn u11_c2_auth_status_click_dispatches_navigation_command() {
             href: "/oauth2/sign_out?rd=/".into(),
         }]
     );
+    assert_eq!(
+        st.pending_navigation.as_deref(),
+        Some("/oauth2/sign_out?rd=/")
+    );
+}
+
+#[test]
+fn u12_root_absolute_asset_paths_and_worker_resolution() {
+    assert!(
+        WORKER_URL.starts_with('/'),
+        "WORKER_URL must be root-absolute, got: {WORKER_URL}"
+    );
+    assert_eq!(WORKER_URL, "/muconsole-data_loader.js");
+
+    let mut st = ConsoleState::new();
+    st.lazy_dyslexic_loaded = true;
+    let html = render_html_shell("", &st);
+    assert!(
+        html.contains("url('/fonts/OpenDyslexicMNerdFontMono-Regular.woff2')"),
+        "render_html_shell must use root-absolute /fonts/ path"
+    );
+    assert!(
+        !html.contains("./fonts/"),
+        "render_html_shell must not contain relative ./fonts/"
+    );
+
+    let index_content = include_str!("../../../index.html");
+    assert!(
+        index_content.contains(r#"<base href="/" />"#),
+        "index.html must contain <base href=\"/\" />"
+    );
+    assert!(!index_content.contains("href=\"./"));
+    assert!(!index_content.contains("src=\"./"));
+    assert!(!index_content.contains("url(\"./"));
+    assert!(!index_content.contains("from './"));
+    assert!(!index_content.contains("init('./"));
 }
