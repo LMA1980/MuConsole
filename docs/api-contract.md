@@ -1,6 +1,6 @@
 # MuConsole Read-Only API Contract
 
-This document defines the read-only HTTP and Server-Sent Events (SSE) contract consumed by the `muconsole-data` Web Worker (`crates/muconsole-protocol/src/dto.rs` and `crates/muconsole-data/src/api.rs`).
+This document defines the read-only HTTP and Server-Sent Events (SSE) contract consumed by the `mu-console-data` Web Worker (`code/protocol/src/dto.rs` and `code/data/src/api.rs`).
 
 All JSON field names and enum variants use `snake_case`, timestamps are Unix epoch milliseconds unless otherwise noted, and unknown fields are ignored by the client so upstream controllers can add fields without breaking compatibility. Optional fields may be either `null` or omitted.
 
@@ -10,6 +10,8 @@ All JSON field names and enum variants use `snake_case`, timestamps are Unix epo
   - `GET /api/repos`
   - `GET /api/repos/{owner}/{repo}/summary`
   - `GET /api/repos/{owner}/{repo}/topology`
+  - `GET /api/cluster/nodes`
+  - `GET /api/queue`
   - `GET /api/events` (SSE stream)
   - `GET /api/auth/session` (operator session status)
   - `POST /api/auth/redeem` (one-time invite redemption)

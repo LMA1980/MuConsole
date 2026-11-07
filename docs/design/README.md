@@ -47,13 +47,13 @@ flowchart LR
     NGX --> MCC["MuConDe-controller /api/cd/* (read-only)"]
 ```
 
-| Crate                | Target        | Licence                                       | Responsibility                                                                                    |
-| -------------------- | ------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `muconsole-protocol` | native + wasm | LGPL-3.0-only WITH LGPL-3.0-linking-exception | `UiCommand` / `DataEvent` enums, view models, postcard codec, protocol version                    |
-| `muconsole-theme`    | native + wasm | AGPL-3.0-only                                 | Material tokens, instrument library, Full / Lite / Auto intensity, generated `tokens.css`         |
-| `muconsole-layout`   | native + wasm | AGPL-3.0-only                                 | Pure solver `solve(viewport, safe_area, area, font) -> Frames`, tested natively for "no overflow" |
-| `muconsole-ui`       | wasm (main)   | AGPL-3.0-only                                 | Root `<svg>` renderer, components, router, input handling                                         |
-| `muconsole-data`     | wasm (worker) | AGPL-3.0-only                                 | Fetching, SSE parsing, normalized store, diffing, coalescing (≤ 10 Hz), offline cache             |
+| Crate                 | Path            | Target        | Licence                                       | Responsibility                                                                                    |
+| --------------------- | --------------- | ------------- | --------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `mu-console-protocol` | `code/protocol` | native + wasm | LGPL-3.0-only WITH LGPL-3.0-linking-exception | `UiCommand` / `DataEvent` enums, view models, postcard codec, protocol version                    |
+| `mu-console-theme`    | `code/theme`    | native + wasm | LGPL-3.0-only WITH LGPL-3.0-linking-exception | Material tokens, instrument library, Full / Lite / Auto intensity, generated `tokens.css`         |
+| `mu-console-layout`   | `code/layout`   | native + wasm | LGPL-3.0-only WITH LGPL-3.0-linking-exception | Pure solver `solve(viewport, safe_area, area, font) -> Frames`, tested natively for "no overflow" |
+| `mu-console-ui`       | `code/ui`       | wasm (main)   | AGPL-3.0-only                                 | Root `<svg>` renderer, components, router, input handling                                         |
+| `mu-console-data`     | `code/data`     | wasm (worker) | AGPL-3.0-only                                 | Fetching, SSE parsing, normalized store, diffing, coalescing (≤ 10 Hz), offline cache             |
 
 ### 2.1 Worker protocol
 
